@@ -16,20 +16,24 @@ def resize_image(image):
 
 # Function to generate image from text prompt
 def generate_image_from_text(api_key, prompt):
-    url = "https://api.stability.ai/v2beta/generate-image"
+    url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"  # Correct endpoint
     headers = {
-        "authorization": f"Bearer {api_key}"
+        "authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
     }
     data = {
-        "prompt": prompt,
+        "text_prompts": [{"text": prompt}],
         "height": 768,
-        "width": 768
+        "width": 768,
+        "samples": 1,
+        "cfg_scale": 7,  # Adjust as needed
+        "steps": 30     # Adjust for quality/speed
     }
     
-    response = requests.post(url, headers=headers, data=data)
+    response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
-        image_data = response.content
-        image = Image.open(io.BytesIO(image_data))
+        image_data = response.json()['artifacts'][0]['base64']
+        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
         return image
     else:
         st.error(f"Error generating image: {response.status_code} - {response.text}")
