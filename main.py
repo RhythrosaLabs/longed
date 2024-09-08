@@ -7,6 +7,10 @@ import io
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 import numpy as np
 import os
+import sys
+
+# Redirect stderr to stdout to avoid issues with logging in some environments
+sys.stderr = sys.stdout
 
 # Function to resize image to supported dimensions
 def resize_image(image):
@@ -187,7 +191,7 @@ def main():
             final_video = concatenate_videos(video_clips)
             if final_video:
                 final_video_path = "longform_video.mp4"
-                final_video.write_videofile(final_video_path)
+                final_video.write_videofile(final_video_path, verbose=False, progress_bar=False)  # Disable progress bar
                 
                 # Provide download link
                 st.video(final_video_path)
