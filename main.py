@@ -1,7 +1,17 @@
 import streamlit as st
 import requests
 import time
-import os
+from PIL import Image
+import io
+
+# Function to resize image to supported dimensions
+def resize_image(image):
+    width, height = image.size
+    if (width, height) == (1024, 576) or (width, height) == (576, 1024) or (width, height) == (768, 768):
+        return image  # Return if image already has valid dimensions
+    else:
+        st.warning("Resizing image to 768x768 (default)")
+        return image.resize((768, 768))  # Default resize
 
 # Function to start video generation
 def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, seed=0):
@@ -9,9 +19,16 @@ def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, 
     headers = {
         "authorization": f"Bearer {api_key}"
     }
+    
+    # Convert PIL image to bytes for the request
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='PNG')
+    img_byte_arr = img_byte_arr.getvalue()
+
     files = {
-        "image": image
+        "image": ("image.png", img_byte_arr, "image/png")
     }
+    
     data = {
         "seed": seed,
         "cfg_scale": cfg_scale,
@@ -50,18 +67,24 @@ def main():
 
     # User inputs API key and parameters
     api_key = st.text_input("Enter your Stability AI API Key", type="password")
-    image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
+    image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
     cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
     motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
     seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
 
     if st.button("Generate Video"):
-        if not api_key or not image:
+        if not api_key or not image_file:
             st.error("Please enter the API key and upload an image.")
         else:
+            # Open the uploaded image using PIL
+            image = Image.open(image_file)
+            
+            # Resize the image to supported dimensions if necessary
+            resized_image = resize_image(image)
+
             # Start the video generation process
             st.write("Starting video generation...")
-            generation_id = start_video_generation(api_key, image, cfg_scale, motion_bucket_id, seed)
+            generation_id = start_video_generation(api_key, resized_image, cfg_scale, motion_bucket_id, seed)
             
             if generation_id:
                 st.write(f"Generation started with ID: {generation_id}")
