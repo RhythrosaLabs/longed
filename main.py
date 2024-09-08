@@ -93,12 +93,23 @@ def poll_for_video(api_key, generation_id):
             st.error(f"Error: {response.status_code} - {response.text}")
             return None
 
+# Function to check if a video clip is valid (not corrupted)
+def check_video_clip_validity(video_path):
+    try:
+        clip = VideoFileClip(video_path)
+        duration = clip.duration
+        clip.close()
+        return duration > 0
+    except Exception as e:
+        st.error(f"Video segment corrupted or unreadable: {video_path}, Error: {str(e)}")
+        return False
+
 # Function to concatenate videos
 def concatenate_videos(video_clips):
     try:
-        clips = [VideoFileClip(path) for path in video_clips]
-        final_video = concatenate_videoclips(clips)
-        for clip in clips:
+        valid_clips = [VideoFileClip(path) for path in video_clips if check_video_clip_validity(path)]
+        final_video = concatenate_videoclips(valid_clips)
+        for clip in valid_clips:
             clip.close()  # Ensure each video file is properly closed
         return final_video
     except Exception as e:
@@ -107,11 +118,15 @@ def concatenate_videos(video_clips):
 
 # Function to extract the last frame from a video and convert it to an image
 def get_last_frame_image(video_path):
-    video_clip = VideoFileClip(video_path)
-    last_frame = video_clip.get_frame(video_clip.duration)
-    last_frame_image = Image.fromarray(np.uint8(last_frame)).convert('RGB')
-    video_clip.close()  # Close the video clip after extracting the frame
-    return last_frame_image
+    try:
+        video_clip = VideoFileClip(video_path)
+        last_frame = video_clip.get_frame(video_clip.duration)
+        last_frame_image = Image.fromarray(np.uint8(last_frame)).convert('RGB')
+        video_clip.close()  # Close the video clip after extracting the frame
+        return last_frame_image
+    except Exception as e:
+        st.error(f"Error extracting last frame from {video_path}: {str(e)}")
+        return None
 
 # Streamlit UI
 def main():
@@ -177,7 +192,8 @@ def main():
 
                     # Extract the last frame from the video and convert it to an image
                     last_frame_image = get_last_frame_image(video_path)
-                    current_image = last_frame_image  # Update the image for the next segment
+                    if last_frame_image:
+                        current_image = last_frame_image  # Update the image for the next segment
                 else:
                     st.error("Failed to retrieve video content.")
                     return
