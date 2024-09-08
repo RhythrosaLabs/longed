@@ -18,7 +18,7 @@ def resize_image(image):
 
 # Function to generate image from text prompt
 def generate_image_from_text(api_key, prompt):
-    url = "https://api.stability.ai/v1/generation/stable-diffusion-v1-5/text-to-image"
+    url = "https://api.stability.ai/v1/generation/stable-diffusion-v1-6/text-to-image"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
