@@ -7,8 +7,7 @@ import os
 def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, seed=0):
     url = "https://api.stability.ai/v2beta/image-to-video"
     headers = {
-        "authorization": f"Bearer {api_key}",
-        "Content-Type": "multipart/form-data"
+        "authorization": f"Bearer {api_key}"
     }
     files = {
         "image": image
