@@ -1,11 +1,9 @@
 import streamlit as st
 import requests
-import time
 import base64
 from PIL import Image
 import io
 from moviepy.editor import VideoFileClip, concatenate_videoclips
-import numpy as np
 import os
 import sys
 
@@ -86,28 +84,16 @@ def poll_for_video(api_key, generation_id):
         response = requests.get(url, headers=headers)
         if response.status_code == 202:
             st.write("Video generation in progress... Polling again in 10 seconds.")
-            time.sleep(10)
         elif response.status_code == 200:
             return response.content
         else:
             st.error(f"Error: {response.status_code} - {response.text}")
             return None
 
-# Function to check if a video clip is valid (not corrupted)
-def check_video_clip_validity(video_path):
-    try:
-        clip = VideoFileClip(video_path)
-        duration = clip.duration
-        clip.close()
-        return duration > 0
-    except Exception as e:
-        st.error(f"Video segment corrupted or unreadable: {video_path}, Error: {str(e)}")
-        return False
-
-# Function to concatenate videos
+# Function to concatenate videos based on quantity
 def concatenate_videos(video_clips):
     try:
-        valid_clips = [VideoFileClip(path) for path in video_clips if check_video_clip_validity(path)]
+        valid_clips = [VideoFileClip(path) for path in video_clips]
         final_video = concatenate_videoclips(valid_clips)
         for clip in valid_clips:
             clip.close()  # Ensure each video file is properly closed
@@ -141,11 +127,11 @@ def main():
     else:
         image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
-    # Common parameters
+    # Parameters for video generation
     cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
     motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
     seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
-    num_segments = st.slider("Number of 5-second segments to generate", 1, 60, 1)
+    num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
 
     if st.button("Generate Longform Video"):
         if not api_key:
@@ -202,7 +188,7 @@ def main():
                 return
 
         if video_clips:
-            # Concatenate all video segments
+            # Concatenate all video segments based on quantity
             st.write("Concatenating video segments into one longform video...")
             final_video = concatenate_videos(video_clips)
             if final_video:
