@@ -4,6 +4,7 @@ import time
 from PIL import Image
 import io
 from moviepy.editor import concatenate_videoclips, VideoFileClip
+import base64
 
 # Function to resize image to supported dimensions
 def resize_image(image):
