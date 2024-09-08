@@ -191,7 +191,7 @@ def main():
             final_video = concatenate_videos(video_clips)
             if final_video:
                 final_video_path = "longform_video.mp4"
-                final_video.write_videofile(final_video_path, verbose=False, progress_bar=False)  # Disable progress bar
+                final_video.write_videofile(final_video_path, logger=None)  # Suppress logging
                 
                 # Provide download link
                 st.video(final_video_path)
