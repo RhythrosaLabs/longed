@@ -2,4 +2,6 @@ streamlit
 diffusers
 transformers
 torch
-MoviePy
+moviepy
+numpy
+pillow
