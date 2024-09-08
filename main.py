@@ -6,6 +6,7 @@ from PIL import Image
 import io
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 import numpy as np
+import os
 
 # Function to resize image to supported dimensions
 def resize_image(image):
@@ -18,7 +19,7 @@ def resize_image(image):
 
 # Function to generate image from text prompt
 def generate_image_from_text(api_key, prompt):
-    url = "https://api.stability.ai/v1/generation/stable-diffusion-v1-6/text-to-image"
+    url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -90,18 +91,22 @@ def poll_for_video(api_key, generation_id):
 
 # Function to concatenate videos
 def concatenate_videos(video_clips):
-    clips = [VideoFileClip(path) for path in video_clips]
-    final_video = concatenate_videoclips(clips)
-    return final_video
+    try:
+        clips = [VideoFileClip(path) for path in video_clips]
+        final_video = concatenate_videoclips(clips)
+        for clip in clips:
+            clip.close()  # Ensure each video file is properly closed
+        return final_video
+    except Exception as e:
+        st.error(f"Error concatenating videos: {str(e)}")
+        return None
 
 # Function to extract the last frame from a video and convert it to an image
 def get_last_frame_image(video_path):
     video_clip = VideoFileClip(video_path)
-    # Get the last frame
     last_frame = video_clip.get_frame(video_clip.duration)
-    # Convert frame (numpy array) to PIL image
     last_frame_image = Image.fromarray(np.uint8(last_frame)).convert('RGB')
-    video_clip.close()
+    video_clip.close()  # Close the video clip after extracting the frame
     return last_frame_image
 
 # Streamlit UI
@@ -168,8 +173,7 @@ def main():
 
                     # Extract the last frame from the video and convert it to an image
                     last_frame_image = get_last_frame_image(video_path)
-                    # Update current_image with the last frame
-                    current_image = last_frame_image
+                    current_image = last_frame_image  # Update the image for the next segment
                 else:
                     st.error("Failed to retrieve video content.")
                     return
@@ -181,13 +185,18 @@ def main():
             # Concatenate all video segments
             st.write("Concatenating video segments into one longform video...")
             final_video = concatenate_videos(video_clips)
-            final_video_path = "longform_video.mp4"
-            final_video.write_videofile(final_video_path)
-
-            # Provide download link
-            st.video(final_video_path)
-            with open(final_video_path, "rb") as f:
-                st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
+            if final_video:
+                final_video_path = "longform_video.mp4"
+                final_video.write_videofile(final_video_path)
+                
+                # Provide download link
+                st.video(final_video_path)
+                with open(final_video_path, "rb") as f:
+                    st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
+            
+            # Clean up video files after concatenation
+            for video_file in video_clips:
+                os.remove(video_file)
 
 if __name__ == "__main__":
     main()
