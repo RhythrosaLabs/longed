@@ -1,15 +1,16 @@
 import streamlit as st
 import requests
 import time
+import base64
 from PIL import Image
 import io
-from moviepy.editor import concatenate_videoclips, VideoFileClip
-import base64
+from moviepy.editor import VideoFileClip, concatenate_videoclips
+import numpy as np
 
 # Function to resize image to supported dimensions
 def resize_image(image):
     width, height = image.size
-    if (width, height) == (1024, 576) or (width, height) == (576, 1024) or (width, height) == (768, 768):
+    if (width, height) in [(1024, 576), (576, 1024), (768, 768)]:
         return image  # Return if image already has valid dimensions
     else:
         st.warning("Resizing image to 768x768 (default)")
@@ -17,24 +18,23 @@ def resize_image(image):
 
 # Function to generate image from text prompt
 def generate_image_from_text(api_key, prompt):
-    url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"  # Correct endpoint
+    url = "https://api.stability.ai/v1/generation/stable-diffusion-v1-5/text-to-image"
     headers = {
-        "authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
     data = {
         "text_prompts": [{"text": prompt}],
+        "cfg_scale": 7,
         "height": 768,
         "width": 768,
         "samples": 1,
-        "cfg_scale": 7,  # Adjust as needed
-        "steps": 30     # Adjust for quality/speed
+        "steps": 30,
     }
-    
     response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
         image_data = response.json()['artifacts'][0]['base64']
-        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+        image = Image.open(io.BytesIO(base64.b64decode(image_data)))  # Decode base64 to image
         return image
     else:
         st.error(f"Error generating image: {response.status_code} - {response.text}")
@@ -44,9 +44,9 @@ def generate_image_from_text(api_key, prompt):
 def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, seed=0):
     url = "https://api.stability.ai/v2beta/image-to-video"
     headers = {
-        "authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key}"
     }
-    
+
     # Convert PIL image to bytes for the request
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format='PNG')
@@ -55,13 +55,13 @@ def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, 
     files = {
         "image": ("image.png", img_byte_arr, "image/png")
     }
-    
+
     data = {
-        "seed": seed,
-        "cfg_scale": cfg_scale,
-        "motion_bucket_id": motion_bucket_id
+        "seed": str(seed),
+        "cfg_scale": str(cfg_scale),
+        "motion_bucket_id": str(motion_bucket_id)
     }
-    
+
     response = requests.post(url, headers=headers, files=files, data=data)
     if response.status_code == 200:
         return response.json().get('id')
@@ -73,10 +73,10 @@ def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, 
 def poll_for_video(api_key, generation_id):
     url = f"https://api.stability.ai/v2beta/image-to-video/result/{generation_id}"
     headers = {
-        "authorization": f"Bearer {api_key}",
-        "accept": "video/*"
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "video/*"
     }
-    
+
     while True:
         response = requests.get(url, headers=headers)
         if response.status_code == 202:
@@ -94,6 +94,16 @@ def concatenate_videos(video_clips):
     final_video = concatenate_videoclips(clips)
     return final_video
 
+# Function to extract the last frame from a video and convert it to an image
+def get_last_frame_image(video_path):
+    video_clip = VideoFileClip(video_path)
+    # Get the last frame
+    last_frame = video_clip.get_frame(video_clip.duration)
+    # Convert frame (numpy array) to PIL image
+    last_frame_image = Image.fromarray(np.uint8(last_frame)).convert('RGB')
+    video_clip.close()
+    return last_frame_image
+
 # Streamlit UI
 def main():
     st.title("Stable Diffusion Longform Video Creator")
@@ -106,7 +116,7 @@ def main():
         prompt = st.text_input("Enter a text prompt for video generation")
     else:
         image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
-    
+
     # Common parameters
     cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
     motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
@@ -117,15 +127,15 @@ def main():
         if not api_key:
             st.error("Please enter the API key.")
             return
-        
+
         if mode == "Text-to-Video" and not prompt:
             st.error("Please enter a text prompt.")
             return
-        
+
         if mode == "Image-to-Video" and not image_file:
             st.error("Please upload an image.")
             return
-        
+
         # Generate image from text or use uploaded image
         if mode == "Text-to-Video":
             st.write("Generating image from text prompt...")
@@ -134,7 +144,7 @@ def main():
                 return
         else:
             image = Image.open(image_file)
-        
+
         # Resize image if necessary
         image = resize_image(image)
 
@@ -145,10 +155,10 @@ def main():
         for i in range(num_segments):
             st.write(f"Generating video segment {i+1}/{num_segments}...")
             generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
-            
+
             if generation_id:
                 video_content = poll_for_video(api_key, generation_id)
-                
+
                 if video_content:
                     # Save the video segment
                     video_path = f"video_segment_{i+1}.mp4"
@@ -156,8 +166,16 @@ def main():
                         f.write(video_content)
                     video_clips.append(video_path)
 
-                    # Use the last frame of the video as the starting image for the next video
-                    current_image = Image.open(io.BytesIO(video_content))  # Example: Grab last frame logic here
+                    # Extract the last frame from the video and convert it to an image
+                    last_frame_image = get_last_frame_image(video_path)
+                    # Update current_image with the last frame
+                    current_image = last_frame_image
+                else:
+                    st.error("Failed to retrieve video content.")
+                    return
+            else:
+                st.error("Failed to start video generation.")
+                return
 
         if video_clips:
             # Concatenate all video segments
