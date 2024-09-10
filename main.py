@@ -128,20 +128,18 @@ def concatenate_videos(video_clips):
 
     if not valid_clips:
         st.error("No valid video segments found. Unable to concatenate.")
-        return None
+        return None, None
 
     try:
         st.write(f"Attempting to concatenate {len(valid_clips)} valid clips")
         final_video = concatenate_videoclips(valid_clips)
         st.write(f"Concatenation successful. Final video duration: {final_video.duration} seconds")
-        for clip in valid_clips:
-            clip.close()
-        return final_video
+        return final_video, valid_clips
     except Exception as e:
         st.error(f"Error concatenating videos: {str(e)}")
         for clip in valid_clips:
             clip.close()
-        return None
+        return None, None
 
 def get_last_frame_image(video_path):
     if not os.path.exists(video_path):
@@ -249,14 +247,25 @@ def main():
                         st.write(f"  Error reading clip: {str(e)}")
 
                 st.write("Concatenating video segments into one longform video...")
-                final_video = concatenate_videos(video_clips)
+                final_video, valid_clips = concatenate_videos(video_clips)
                 if final_video:
-                    final_video_path = "longform_video.mp4"
-                    final_video.write_videofile(final_video_path, logger=None)
-                    
-                    st.video(final_video_path)
-                    with open(final_video_path, "rb") as f:
-                        st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
+                    try:
+                        final_video_path = "longform_video.mp4"
+                        final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
+                        
+                        st.video(final_video_path)
+                        with open(final_video_path, "rb") as f:
+                            st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
+                    except Exception as e:
+                        st.error(f"Error writing final video: {str(e)}")
+                        st.write("Traceback:", traceback.format_exc())
+                    finally:
+                        # Close all clips
+                        if final_video:
+                            final_video.close()
+                        if valid_clips:
+                            for clip in valid_clips:
+                                clip.close()
                 else:
                     st.error("Failed to create the final video.")
                 
