@@ -8,6 +8,7 @@ import os
 import sys
 import numpy as np
 import time
+import traceback
 
 # Redirect stderr to stdout to avoid issues with logging in some environments
 sys.stderr = sys.stdout
@@ -102,6 +103,7 @@ def validate_video_clip(video_path):
             return False
         duration = clip.duration
         clip.close()
+        st.write(f"Validated video clip: {video_path}, Duration: {duration} seconds")
         return duration > 0
     except Exception as e:
         st.error(f"Invalid video segment: {video_path}, Error: {str(e)}")
@@ -110,27 +112,35 @@ def validate_video_clip(video_path):
 def concatenate_videos(video_clips):
     valid_clips = []
     for clip_path in video_clips:
+        st.write(f"Attempting to load clip: {clip_path}")
         if validate_video_clip(clip_path):
             try:
                 clip = VideoFileClip(clip_path)
                 if clip is not None and clip.duration > 0:
                     valid_clips.append(clip)
+                    st.write(f"Successfully loaded clip: {clip_path}, Duration: {clip.duration} seconds")
                 else:
                     st.warning(f"Skipping invalid clip: {clip_path}")
             except Exception as e:
                 st.warning(f"Error loading clip {clip_path}: {str(e)}")
+        else:
+            st.warning(f"Validation failed for clip: {clip_path}")
 
     if not valid_clips:
         st.error("No valid video segments found. Unable to concatenate.")
         return None
 
     try:
+        st.write(f"Attempting to concatenate {len(valid_clips)} valid clips")
         final_video = concatenate_videoclips(valid_clips)
+        st.write(f"Concatenation successful. Final video duration: {final_video.duration} seconds")
         for clip in valid_clips:
             clip.close()
         return final_video
     except Exception as e:
         st.error(f"Error concatenating videos: {str(e)}")
+        for clip in valid_clips:
+            clip.close()
         return None
 
 def get_last_frame_image(video_path):
@@ -226,6 +236,18 @@ def main():
                     st.error(f"Failed to start video generation for segment {i+1}.")
 
             if video_clips:
+                st.write("Preparing to concatenate video segments...")
+                for i, video_path in enumerate(video_clips):
+                    st.write(f"Video segment {i+1}:")
+                    st.write(f"  Path: {video_path}")
+                    st.write(f"  Exists: {os.path.exists(video_path)}")
+                    st.write(f"  Size: {os.path.getsize(video_path)} bytes")
+                    try:
+                        with VideoFileClip(video_path) as clip:
+                            st.write(f"  Duration: {clip.duration} seconds")
+                    except Exception as e:
+                        st.write(f"  Error reading clip: {str(e)}")
+
                 st.write("Concatenating video segments into one longform video...")
                 final_video = concatenate_videos(video_clips)
                 if final_video:
@@ -235,7 +257,10 @@ def main():
                     st.video(final_video_path)
                     with open(final_video_path, "rb") as f:
                         st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
+                else:
+                    st.error("Failed to create the final video.")
                 
+                # Clean up individual video segments
                 for video_file in video_clips:
                     if os.path.exists(video_file):
                         os.remove(video_file)
@@ -247,6 +272,8 @@ def main():
 
         except Exception as e:
             st.error(f"An unexpected error occurred: {str(e)}")
+            st.write("Error details:", str(e))
+            st.write("Traceback:", traceback.format_exc())
 
 if __name__ == "__main__":
     main()
