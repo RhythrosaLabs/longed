@@ -341,8 +341,7 @@ def main():
 
                     if video_clips:
                         st.write("Concatenating video segments into one longform video...")
-
-final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
+                        final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
                         if final_video:
                             try:
                                 final_video_path = "longform_video.mp4"
