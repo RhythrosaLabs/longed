@@ -350,7 +350,7 @@ def main():
         
         with tab1:
             st.subheader("Generated Images")
-    cols = st.columns(len(st.session_state.generated_images))
+            cols = st.columns(len(st.session_state.generated_images))
             for i, img in enumerate(st.session_state.generated_images):
                 with cols[i]:
                     st.image(img, caption=f"Image {i+1}", use_column_width=True)
