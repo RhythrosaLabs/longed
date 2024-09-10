@@ -3,7 +3,7 @@ import requests
 import base64
 from PIL import Image
 import io
-from moviepy.editor import VideoFileClip, concatenate_videoclips
+from moviepy.editor import VideoFileClip, concatenate_videoclips, CompositeVideoClip, vfx
 import os
 import sys
 import numpy as np
@@ -109,7 +109,7 @@ def validate_video_clip(video_path):
         st.error(f"Invalid video segment: {video_path}, Error: {str(e)}")
         return False
 
-def concatenate_videos(video_clips):
+def concatenate_videos(video_clips, crossfade_duration=0.05):
     valid_clips = []
     for clip_path in video_clips:
         st.write(f"Attempting to load clip: {clip_path}")
@@ -131,8 +131,25 @@ def concatenate_videos(video_clips):
         return None, None
 
     try:
-        st.write(f"Attempting to concatenate {len(valid_clips)} valid clips")
-        final_video = concatenate_videoclips(valid_clips)
+        st.write(f"Attempting to concatenate {len(valid_clips)} valid clips with crossfade")
+        
+        # Apply crossfade transition
+        final_clips = []
+        for i, clip in enumerate(valid_clips):
+            if i == 0:
+                final_clips.append(clip)
+            else:
+                # Create a crossfade transition
+                fade_out = valid_clips[i-1].fx(vfx.fadeout, duration=crossfade_duration)
+                fade_in = clip.fx(vfx.fadein, duration=crossfade_duration)
+                transition = CompositeVideoClip([fade_out, fade_in])
+                transition = transition.set_duration(crossfade_duration)
+                
+                # Add the transition and the full clip
+                final_clips.append(transition)
+                final_clips.append(clip)
+
+        final_video = concatenate_videoclips(final_clips)
         st.write(f"Concatenation successful. Final video duration: {final_video.duration} seconds")
         return final_video, valid_clips
     except Exception as e:
@@ -247,7 +264,7 @@ def main():
                         st.write(f"  Error reading clip: {str(e)}")
 
                 st.write("Concatenating video segments into one longform video...")
-                final_video, valid_clips = concatenate_videos(video_clips)
+                final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=0.05)
                 if final_video:
                     try:
                         final_video_path = "longform_video.mp4"
