@@ -9,6 +9,8 @@ import sys
 import numpy as np
 import time
 import traceback
+import zipfile
+import pandas as pd
 
 # Redirect stderr to stdout to avoid issues with logging in some environments
 sys.stderr = sys.stdout
@@ -20,6 +22,8 @@ if 'generated_videos' not in st.session_state:
     st.session_state.generated_videos = []
 if 'final_video' not in st.session_state:
     st.session_state.final_video = None
+if 'frame_intervals' not in st.session_state:
+    st.session_state.frame_intervals = pd.DataFrame(columns=['Frame', 'Prompt'])
 
 def resize_image(image):
     width, height = image.size
@@ -29,7 +33,7 @@ def resize_image(image):
         st.warning("Resizing image to 768x768 (default)")
         return image.resize((768, 768))
 
-def generate_image_from_text(api_key, prompt):
+def generate_image_from_text(api_key, prompt, cfg_scale=7):
     url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -37,7 +41,7 @@ def generate_image_from_text(api_key, prompt):
     }
     data = {
         "text_prompts": [{"text": prompt}],
-        "cfg_scale": 7,
+        "cfg_scale": cfg_scale,
         "height": 768,
         "width": 768,
         "samples": 1,
@@ -243,44 +247,53 @@ def create_zip_file(images, videos, output_path="generated_content.zip"):
     
     return output_path
 
-def snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id, seed):
-    st.write("Generating initial image for Snapshot Mode v2...")
-    initial_image = generate_image_from_text(api_key, prompt)
-    if initial_image is None:
-        return None, None
-
-    st.session_state.generated_images.append(initial_image)
+def frame_intervals_input():
+    st.subheader("Frame Intervals")
+    st.write("Add specific prompts for different frames. This helps guide the story, especially with high CFG settings.")
     
-    video_clips = []
-    current_image = initial_image
+    # Display existing intervals
+    st.write("Current Frame Intervals:")
+    st.dataframe(st.session_state.frame_intervals)
 
-    for i in range(num_segments):
-        st.write(f"Generating video segment {i+1}/{num_segments}...")
-        generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
+    # Input for new interval
+    new_frame = st.number_input("Frame Number", min_value=0, step=1)
+    new_prompt = st.text_input("Prompt for this frame")
+    
+    if st.button("Add Frame Interval"):
+        new_row = pd.DataFrame({'Frame': [new_frame], 'Prompt': [new_prompt]})
+        st.session_state.frame_intervals = pd.concat([st.session_state.frame_intervals, new_row], ignore_index=True)
+        st.session_state.frame_intervals = st.session_state.frame_intervals.sort_values('Frame').reset_index(drop=True)
+        st.success(f"Added prompt for frame {new_frame}")
 
-        if generation_id:
-            video_content = poll_for_video(api_key, generation_id)
+    if st.button("Clear All Intervals"):
+        st.session_state.frame_intervals = pd.DataFrame(columns=['Frame', 'Prompt'])
+        st.success("Cleared all frame intervals")
 
-            if video_content:
-                video_path = f"video_segment_{i+1}.mp4"
-                with open(video_path, "wb") as f:
-                    f.write(video_content)
-                st.write(f"Saved video segment to {video_path}")
-                video_clips.append(video_path)
-                st.session_state.generated_videos.append(video_path)
+def interpolate_prompt(base_prompt, frame_intervals, current_frame, total_frames):
+    """Interpolate between prompts based on the current frame."""
+    if frame_intervals.empty:
+        return base_prompt
 
-                last_frame_image = get_last_frame_image(video_path)
-                if last_frame_image:
-                    current_image = last_frame_image
-                    st.session_state.generated_images.append(current_image)
-                else:
-                    st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
-            else:
-                st.error(f"Failed to retrieve video content for segment {i+1}.")
-        else:
-            st.error(f"Failed to start video generation for segment {i+1}.")
+    # Find the two nearest frame intervals
+    prev_interval = frame_intervals[frame_intervals['Frame'] <= current_frame].iloc[-1] if not frame_intervals[frame_intervals['Frame'] <= current_frame].empty else None
+    next_interval = frame_intervals[frame_intervals['Frame'] > current_frame].iloc[0] if not frame_intervals[frame_intervals['Frame'] > current_frame].empty else None
 
-    return video_clips, initial_image
+    if prev_interval is None:
+        return next_interval['Prompt']
+    if next_interval is None:
+        return prev_interval['Prompt']
+
+    # Interpolate between the two prompts
+    prev_frame, prev_prompt = prev_interval['Frame'], prev_interval['Prompt']
+    next_frame, next_prompt = next_interval['Frame'], next_interval['Prompt']
+    
+    if prev_frame == next_frame:
+        return prev_prompt
+
+    weight = (current_frame - prev_frame) / (next_frame - prev_frame)
+    interpolated_prompt = f"{prev_prompt} {(1-weight):.2f} {next_prompt} {weight:.2f}"
+    
+    return interpolated_prompt
 
 def main():
     st.set_page_config(page_title="Stable Diffusion Longform Video Creator", layout="wide")
@@ -322,16 +335,16 @@ def main():
             image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
         with st.expander("Settings", expanded=False):
+            if mode in ["Text-to-Video", "Snapshot Mode"]:
+                use_frame_intervals = st.checkbox("Use Frame Intervals", value=False)
+                if use_frame_intervals:
+                    frame_intervals_input()
+
             if mode == "Snapshot Mode":
                 num_images = st.slider("Number of images to generate", 10, 300, 60)
                 fps = st.slider("Frames per second", 1, 60, 24)
-                use_video = st.checkbox("Generate video from images", value=False)
-                if use_video:
-                    num_segments = st.slider("Number of video segments", 1, 10, 5)
-                    cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
-                    motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
-                    seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
-                    crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
+                create_video = st.checkbox("Create video from images", value=False)
+                cfg_scale = st.slider("CFG Scale (applied to first image)", 0.0, 30.0, 7.0)
             else:
                 cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
                 motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
@@ -360,81 +373,64 @@ def main():
             try:
                 if mode == "Snapshot Mode":
                     st.write("Generating images for Snapshot Mode...")
-                    images = generate_multiple_images(api_key, prompt, num_images)
+                    images = []
+                    for i in range(num_images):
+                        if use_frame_intervals:
+                            current_prompt = interpolate_prompt(prompt, st.session_state.frame_intervals, i, num_images)
+                        else:
+                            current_prompt = prompt
+                        
+                        st.write(f"Generating image {i+1}/{num_images}...")
+                        
+                        # Apply CFG scale to the first image
+                        if i == 0:
+                            image = generate_image_from_text(api_key, current_prompt, cfg_scale=cfg_scale)
+                        else:
+                            image = generate_image_from_text(api_key, current_prompt)
+                        
+                        if image:
+                            images.append(image)
+                        else:
+                            st.error(f"Failed to generate image {i+1}")
+                    
                     st.session_state.generated_images = images
                     
                     if images:
-                        if use_video:
+                        st.success(f"Generated {len(images)} images for Snapshot Mode.")
+                        if create_video:
                             st.write("Creating video from generated images...")
-                            video_clips = []
-                            for i, image in enumerate(images):
-                                st.write(f"Generating video segment {i+1}/{num_segments}...")
-                                generation_id = start_video_generation(api_key, image, cfg_scale, motion_bucket_id, seed)
-                                if generation_id:
-                                    video_content = poll_for_video(api_key, generation_id)
-                                    if video_content:
-                                        video_path = f"video_segment_{i+1}.mp4"
-                                        with open(video_path, "wb") as f:
-                                            f.write(video_content)
-                                        st.write(f"Saved video segment to {video_path}")
-                                        video_clips.append(video_path)
-                                        st.session_state.generated_videos.append(video_path)
-                                    else:
-                                        st.error(f"Failed to retrieve video content for segment {i+1}.")
-                                else:
-                                    st.error(f"Failed to start video generation for segment {i+1}.")
-                                
-                                if len(video_clips) >= num_segments:
-                                    break
-
-                            if video_clips:
-                                st.write("Concatenating video segments into one longform video...")
-                                final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
-                                if final_video:
-                                    try:
-                                        final_video_path = "snapshot_longform_video.mp4"
-                                        final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
-                                        st.session_state.final_video = final_video_path
-                                        st.success(f"Snapshot Mode video created: {final_video_path}")
-                                    except Exception as e:
-                                        st.error(f"Error writing final video: {str(e)}")
-                                        st.write("Traceback:", traceback.format_exc())
-                                    finally:
-                                        if final_video:
-                                            final_video.close()
-                                        if valid_clips:
-                                            for clip in valid_clips:
-                                                clip.close()
-                                else:
-                                    st.error("Failed to create the final video.")
-                                
-                                # Clean up individual video segments
-                                for video_file in video_clips:
-                                    if os.path.exists(video_file):
-                                        os.remove(video_file)
-                                        st.write(f"Removed temporary file: {video_file}")
-                                    else:
-                                        st.warning(f"Could not find file to remove: {video_file}")
+                            output_path = "snapshot_video.mp4"
+                            final_video_path = create_video_from_images(images, fps, output_path)
+                            if final_video_path:
+                                st.session_state.final_video = final_video_path
+                                st.session_state.generated_videos.append(final_video_path)
+                                st.success(f"Snapshot Mode video created: {final_video_path}")
                             else:
-                                st.error("No video segments were successfully generated.")
-                        else:
-                            st.success(f"Generated {len(images)} images for Snapshot Mode.")
+                                st.error("Failed to create video from images.")
                     else:
-                        st.error("Failed to generate images for Snapshot Mode.")
+                        st.error("Failed to generate any images for Snapshot Mode.")
 
                 elif mode == "Text-to-Video":
-                    st.write("Generating image from text prompt...")
-                    image = generate_image_from_text(api_key, prompt)
-                    if image is None:
-                        return
-                    image = resize_image(image)
-                    st.session_state.generated_images.append(image)
-                    
+                    st.write("Generating video from text prompt...")
                     video_clips = []
-                    current_image = image
+                    current_image = None
 
                     for i in range(num_segments):
+                        if use_frame_intervals:
+                            current_prompt = interpolate_prompt(prompt, st.session_state.frame_intervals, i, num_segments)
+                        else:
+                            current_prompt = prompt
+
                         st.write(f"Generating video segment {i+1}/{num_segments}...")
+                        
+                        if i == 0 or current_image is None:
+                            image = generate_image_from_text(api_key, current_prompt, cfg_scale=cfg_scale)
+                            if image is None:
+                                st.error(f"Failed to generate image for segment {i+1}")
+                                continue
+                            current_image = resize_image(image)
+                            st.session_state.generated_images.append(current_image)
+
                         generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
 
                         if generation_id:
