@@ -281,8 +281,8 @@ def main():
             if mode == "Image-to-Video" and not image_file:
                 st.error("Please upload an image.")
                 return
-        final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
-                        if final_video:
+                final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
+                    if final_video:
                             try:
                                 final_video_path = "longform_video.mp4"
                                 final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
