@@ -229,6 +229,59 @@ def display_images_in_grid(images, columns=3):
                     st.image(images[i + j], use_column_width=True, caption=f"Image {i + j + 1}")
                     st.markdown(f"<p style='text-align: center;'>Image {i + j + 1}</p>", unsafe_allow_html=True)
 
+def create_zip_file(images, videos, output_path="generated_content.zip"):
+    with zipfile.ZipFile(output_path, 'w') as zipf:
+        for i, img in enumerate(images):
+            img_path = f"image_{i+1}.png"
+            img.save(img_path)
+            zipf.write(img_path)
+            os.remove(img_path)
+        
+        for video in videos:
+            if os.path.exists(video):
+                zipf.write(video)
+    
+    return output_path
+
+def snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id, seed):
+    st.write("Generating initial image for Snapshot Mode v2...")
+    initial_image = generate_image_from_text(api_key, prompt)
+    if initial_image is None:
+        return None, None
+
+    st.session_state.generated_images.append(initial_image)
+    
+    video_clips = []
+    current_image = initial_image
+
+    for i in range(num_segments):
+        st.write(f"Generating video segment {i+1}/{num_segments}...")
+        generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
+
+        if generation_id:
+            video_content = poll_for_video(api_key, generation_id)
+
+            if video_content:
+                video_path = f"video_segment_{i+1}.mp4"
+                with open(video_path, "wb") as f:
+                    f.write(video_content)
+                st.write(f"Saved video segment to {video_path}")
+                video_clips.append(video_path)
+                st.session_state.generated_videos.append(video_path)
+
+                last_frame_image = get_last_frame_image(video_path)
+                if last_frame_image:
+                    current_image = last_frame_image
+                    st.session_state.generated_images.append(current_image)
+                else:
+                    st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
+            else:
+                st.error(f"Failed to retrieve video content for segment {i+1}.")
+        else:
+            st.error(f"Failed to start video generation for segment {i+1}.")
+
+    return video_clips, initial_image
+
 def main():
     st.set_page_config(page_title="Stable Diffusion Longform Video Creator", layout="wide")
 
@@ -261,9 +314,9 @@ def main():
     tab1, tab2, tab3 = st.tabs(["Generator", "Images", "Videos"])
 
     with tab1:
-        mode = st.radio("Select Mode", ("Text-to-Video", "Image-to-Video", "Snapshot Mode"))
+        mode = st.radio("Select Mode", ("Text-to-Video", "Image-to-Video", "Snapshot Mode", "Snapshot Mode v2"))
         
-        if mode == "Text-to-Video" or mode == "Snapshot Mode":
+        if mode in ["Text-to-Video", "Snapshot Mode", "Snapshot Mode v2"]:
             prompt = st.text_area("Enter a text prompt for video generation", height=100)
         elif mode == "Image-to-Video":
             image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
@@ -284,7 +337,7 @@ def main():
                 st.error("Please enter the API key in the sidebar.")
                 return
 
-            if (mode == "Text-to-Video" or mode == "Snapshot Mode") and not prompt:
+            if mode in ["Text-to-Video", "Snapshot Mode", "Snapshot Mode v2"] and not prompt:
                 st.error("Please enter a text prompt.")
                 return
 
@@ -299,20 +352,62 @@ def main():
 
             try:
                 if mode == "Snapshot Mode":
-                    st.write("Generating images for Snapshot Mode...")
-                    images = generate_multiple_images(api_key, prompt, num_images)
-                    st.session_state.generated_images = images
+
+        if st.button("Generate Longform Video"):
+            if not api_key:
+                st.error("Please enter the API key in the sidebar.")
+                return
+
+            if (mode == "Text-to-Video" or mode == "Snapshot Mode") and not prompt:
+                st.error("Please enter a text prompt.")
+                return
+
+            if mode == "Image-to-Video" and not image_file:
+                st.error("Please upload an image.")
+                return
+
+            # Clear previous results
+            st.session_state.generated_images = []
+            st.session_state.generated_videos = []
+            st.session_state.final_video = None
+
+            try:
+                elif mode == "Snapshot Mode v2":
+                    st.write("Generating video for Snapshot Mode v2...")
+                    video_clips, initial_image = snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id, seed)
                     
-                    if images:
-                        st.write("Creating video from generated images...")
-                        output_path = "snapshot_video.mp4"
-                        final_video_path = create_video_from_images(images, fps, output_path)
-                        st.session_state.final_video = final_video_path
-                        st.session_state.generated_videos.append(final_video_path)  # Add this line
-                        st.success(f"Snapshot Mode video created: {final_video_path}")
+                    if video_clips:
+                        st.write("Concatenating video segments into one longform video...")
+                        final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
+                        if final_video:
+                            try:
+                                final_video_path = "longform_video_v2.mp4"
+                                final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
+                                st.session_state.final_video = final_video_path
+                                st.session_state.generated_videos.append(final_video_path)
+                                st.success(f"Longform video created: {final_video_path}")
+                            except Exception as e:
+                                st.error(f"Error writing final video: {str(e)}")
+                                st.write("Traceback:", traceback.format_exc())
+                            finally:
+                                if final_video:
+                                    final_video.close()
+                                if valid_clips:
+                                    for clip in valid_clips:
+                                        clip.close()
+                        else:
+                            st.error("Failed to create the final video.")
+                        
+                        # Clean up individual video segments
+                        for video_file in video_clips:
+                            if os.path.exists(video_file):
+                                os.remove(video_file)
+                                st.write(f"Removed temporary file: {video_file}")
+                            else:
+                                st.warning(f"Could not find file to remove: {video_file}")
                     else:
-                        st.error("Failed to generate images for Snapshot Mode.")
-                
+                        st.error("No video segments were successfully generated.")
+
                 elif mode == "Text-to-Video":
                     st.write("Generating image from text prompt...")
                     image = generate_image_from_text(api_key, prompt)
@@ -437,6 +532,13 @@ def main():
                     st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
         else:
             st.write("No videos generated yet. Use the Generator tab to create videos.")
+
+    # Add download all button
+    if st.session_state.generated_images or st.session_state.generated_videos:
+        zip_path = create_zip_file(st.session_state.generated_images, st.session_state.generated_videos)
+        with open(zip_path, "rb") as f:
+            st.download_button("Download All Content (ZIP)", f, file_name="generated_content.zip")
+        os.remove(zip_path)
 
 if __name__ == "__main__":
     main()
