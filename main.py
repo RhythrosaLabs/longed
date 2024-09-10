@@ -225,9 +225,8 @@ def main():
         """
     )
     
-    st.sidebar.title("Settings")
+    st.sidebar.title("API Key")
     api_key = st.sidebar.text_input("Enter your Stability AI API Key", type="password")
-    mode = st.sidebar.radio("Select Mode", ("Text-to-Video", "Image-to-Video"))
 
     # Main content
     st.title("Stable Diffusion Longform Video Creator")
@@ -235,17 +234,19 @@ def main():
     col1, col2 = st.columns(2)
 
     with col1:
+        mode = st.radio("Select Mode", ("Text-to-Video", "Image-to-Video"))
         if mode == "Text-to-Video":
             prompt = st.text_area("Enter a text prompt for video generation", height=100)
         else:
             image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
     with col2:
-        cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
-        motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
-        seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
-        num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
-        crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
+        with st.expander("Settings", expanded=False):
+            cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
+            motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
+            seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
+            num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
+            crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
 
     if st.button("Generate Longform Video"):
         if not api_key:
