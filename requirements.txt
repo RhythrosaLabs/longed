@@ -5,3 +5,4 @@ torch
 moviepy
 numpy
 pillow
+replicate
