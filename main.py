@@ -216,12 +216,13 @@ def main():
     st.sidebar.markdown(
         """
         1. Enter your Stability AI API Key
-        2. Choose Text-to-Video or Image-to-Video mode
-        3. Enter a prompt or upload an image
-        4. Adjust the settings as desired
-        5. Click 'Generate Longform Video'
-        6. Wait for the process to complete
-        7. View and download the result
+        2. Go to the Generator tab
+        3. Choose Text-to-Video or Image-to-Video mode
+        4. Enter a prompt or upload an image
+        5. Adjust the settings as desired
+        6. Click 'Generate Longform Video'
+        7. Wait for the process to complete
+        8. View results in the Images and Videos tabs
         """
     )
     
@@ -231,16 +232,15 @@ def main():
     # Main content
     st.title("Stable Diffusion Longform Video Creator")
 
-    col1, col2 = st.columns(2)
+    tab1, tab2, tab3 = st.tabs(["Generator", "Images", "Videos"])
 
-    with col1:
+    with tab1:
         mode = st.radio("Select Mode", ("Text-to-Video", "Image-to-Video"))
         if mode == "Text-to-Video":
             prompt = st.text_area("Enter a text prompt for video generation", height=100)
         else:
             image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
-    with col2:
         with st.expander("Settings", expanded=False):
             cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
             motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
@@ -248,116 +248,116 @@ def main():
             num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
             crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
 
-    if st.button("Generate Longform Video"):
-        if not api_key:
-            st.error("Please enter the API key in the sidebar.")
-            return
+        if st.button("Generate Longform Video"):
+            if not api_key:
+                st.error("Please enter the API key in the sidebar.")
+                return
 
-        if mode == "Text-to-Video" and not prompt:
-            st.error("Please enter a text prompt.")
-            return
+            if mode == "Text-to-Video" and not prompt:
+                st.error("Please enter a text prompt.")
+                return
 
-        if mode == "Image-to-Video" and not image_file:
-            st.error("Please upload an image.")
-            return
+            if mode == "Image-to-Video" and not image_file:
+                st.error("Please upload an image.")
+                return
 
-        # Clear previous results
-        st.session_state.generated_images = []
-        st.session_state.generated_videos = []
-        st.session_state.final_video = None
+            # Clear previous results
+            st.session_state.generated_images = []
+            st.session_state.generated_videos = []
+            st.session_state.final_video = None
 
-        try:
-            if mode == "Text-to-Video":
-                st.write("Generating image from text prompt...")
-                image = generate_image_from_text(api_key, prompt)
-                if image is None:
-                    return
-            else:
-                image = Image.open(image_file)
+            try:
+                if mode == "Text-to-Video":
+                    st.write("Generating image from text prompt...")
+                    image = generate_image_from_text(api_key, prompt)
+                    if image is None:
+                        return
+                else:
+                    image = Image.open(image_file)
 
-            image = resize_image(image)
-            st.session_state.generated_images.append(image)
+                image = resize_image(image)
+                st.session_state.generated_images.append(image)
 
-            video_clips = []
-            current_image = image
+                video_clips = []
+                current_image = image
 
-            for i in range(num_segments):
-                st.write(f"Generating video segment {i+1}/{num_segments}...")
-                generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
+                for i in range(num_segments):
+                    st.write(f"Generating video segment {i+1}/{num_segments}...")
+                    generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
 
-                if generation_id:
-                    video_content = poll_for_video(api_key, generation_id)
+                    if generation_id:
+                        video_content = poll_for_video(api_key, generation_id)
 
-                    if video_content:
-                        video_path = f"video_segment_{i+1}.mp4"
-                        with open(video_path, "wb") as f:
-                            f.write(video_content)
-                        st.write(f"Saved video segment to {video_path}")
-                        st.write(f"File exists: {os.path.exists(video_path)}")
-                        st.write(f"File size: {os.path.getsize(video_path)} bytes")
-                        video_clips.append(video_path)
-                        st.session_state.generated_videos.append(video_path)
+                        if video_content:
+                            video_path = f"video_segment_{i+1}.mp4"
+                            with open(video_path, "wb") as f:
+                                f.write(video_content)
+                            st.write(f"Saved video segment to {video_path}")
+                            st.write(f"File exists: {os.path.exists(video_path)}")
+                            st.write(f"File size: {os.path.getsize(video_path)} bytes")
+                            video_clips.append(video_path)
+                            st.session_state.generated_videos.append(video_path)
 
-                        last_frame_image = get_last_frame_image(video_path)
-                        if last_frame_image:
-                            current_image = last_frame_image
-                            st.session_state.generated_images.append(current_image)
+                            last_frame_image = get_last_frame_image(video_path)
+                            if last_frame_image:
+                                current_image = last_frame_image
+                                st.session_state.generated_images.append(current_image)
+                            else:
+                                st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
                         else:
-                            st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
+                            st.error(f"Failed to retrieve video content for segment {i+1}.")
                     else:
-                        st.error(f"Failed to retrieve video content for segment {i+1}.")
-                else:
-                    st.error(f"Failed to start video generation for segment {i+1}.")
+                        st.error(f"Failed to start video generation for segment {i+1}.")
 
-            if video_clips:
-                st.write("Concatenating video segments into one longform video...")
-                final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
-                if final_video:
-                    try:
-                        final_video_path = "longform_video.mp4"
-                        final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
-                        st.session_state.final_video = final_video_path
-                    except Exception as e:
-                        st.error(f"Error writing final video: {str(e)}")
-                        st.write("Traceback:", traceback.format_exc())
-                    finally:
-                        # Close all clips
-                        if final_video:
-                            final_video.close()
-                        if valid_clips:
-                            for clip in valid_clips:
-                                clip.close()
-                else:
-                    st.error("Failed to create the final video.")
-                
-                # Clean up individual video segments
-                for video_file in video_clips:
-                    if os.path.exists(video_file):
-                        os.remove(video_file)
-                        st.write(f"Removed temporary file: {video_file}")
+                if video_clips:
+                    st.write("Concatenating video segments into one longform video...")
+                    final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
+                    if final_video:
+                        try:
+                            final_video_path = "longform_video.mp4"
+                            final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
+                            st.session_state.final_video = final_video_path
+                        except Exception as e:
+                            st.error(f"Error writing final video: {str(e)}")
+                            st.write("Traceback:", traceback.format_exc())
+                        finally:
+                            # Close all clips
+                            if final_video:
+                                final_video.close()
+                            if valid_clips:
+                                for clip in valid_clips:
+                                    clip.close()
                     else:
-                        st.warning(f"Could not find file to remove: {video_file}")
-            else:
-                st.error("No video segments were successfully generated.")
+                        st.error("Failed to create the final video.")
+                    
+                    # Clean up individual video segments
+                    for video_file in video_clips:
+                        if os.path.exists(video_file):
+                            os.remove(video_file)
+                            st.write(f"Removed temporary file: {video_file}")
+                        else:
+                            st.warning(f"Could not find file to remove: {video_file}")
+                else:
+                    st.error("No video segments were successfully generated.")
 
-        except Exception as e:
-            st.error(f"An unexpected error occurred: {str(e)}")
-            st.write("Error details:", str(e))
-            st.write("Traceback:", traceback.format_exc())
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {str(e)}")
+                st.write("Error details:", str(e))
+                st.write("Traceback:", traceback.format_exc())
 
-    # Display results in tabs
-    if st.session_state.generated_images or st.session_state.generated_videos or st.session_state.final_video:
-        tab1, tab2 = st.tabs(["Generated Images", "Generated Videos"])
-        
-        with tab1:
-            st.subheader("Generated Images")
+    with tab2:
+        st.subheader("Generated Images")
+        if st.session_state.generated_images:
             cols = st.columns(len(st.session_state.generated_images))
             for i, img in enumerate(st.session_state.generated_images):
                 with cols[i]:
                     st.image(img, caption=f"Image {i+1}", use_column_width=True)
-        
-        with tab2:
-            st.subheader("Generated Videos")
+        else:
+            st.write("No images generated yet. Use the Generator tab to create images.")
+
+    with tab3:
+        st.subheader("Generated Videos")
+        if st.session_state.generated_videos:
             for i, video_path in enumerate(st.session_state.generated_videos):
                 if os.path.exists(video_path):
                     st.video(video_path)
@@ -368,6 +368,8 @@ def main():
                 st.video(st.session_state.final_video)
                 with open(st.session_state.final_video, "rb") as f:
                     st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
+        else:
+            st.write("No videos generated yet. Use the Generator tab to create videos.")
 
 if __name__ == "__main__":
     main()
