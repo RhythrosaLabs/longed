@@ -203,25 +203,53 @@ def concatenate_videos(video_clips, crossfade_duration=0):
         return None, None
 
 def main():
+    st.set_page_config(page_title="Stable Diffusion Longform Video Creator", layout="wide")
+
+    # Sidebar
+    st.sidebar.title("About")
+    st.sidebar.info(
+        "This app uses Stability AI's API to create longform videos from text prompts or images. "
+        "It generates a series of video segments and concatenates them into a single video."
+    )
+    
+    st.sidebar.title("How to Use")
+    st.sidebar.markdown(
+        """
+        1. Enter your Stability AI API Key
+        2. Choose Text-to-Video or Image-to-Video mode
+        3. Enter a prompt or upload an image
+        4. Adjust the settings as desired
+        5. Click 'Generate Longform Video'
+        6. Wait for the process to complete
+        7. View and download the result
+        """
+    )
+    
+    st.sidebar.title("Settings")
+    api_key = st.sidebar.text_input("Enter your Stability AI API Key", type="password")
+    mode = st.sidebar.radio("Select Mode", ("Text-to-Video", "Image-to-Video"))
+
+    # Main content
     st.title("Stable Diffusion Longform Video Creator")
 
-    api_key = st.text_input("Enter your Stability AI API Key", type="password")
-    mode = st.radio("Select Mode", ("Text-to-Video", "Image-to-Video"))
+    col1, col2 = st.columns(2)
 
-    if mode == "Text-to-Video":
-        prompt = st.text_input("Enter a text prompt for video generation")
-    else:
-        image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
+    with col1:
+        if mode == "Text-to-Video":
+            prompt = st.text_area("Enter a text prompt for video generation", height=100)
+        else:
+            image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
-    cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
-    motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
-    seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
-    num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
-    crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
+    with col2:
+        cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
+        motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
+        seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
+        num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
+        crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
 
     if st.button("Generate Longform Video"):
         if not api_key:
-            st.error("Please enter the API key.")
+            st.error("Please enter the API key in the sidebar.")
             return
 
         if mode == "Text-to-Video" and not prompt:
@@ -322,7 +350,7 @@ def main():
         
         with tab1:
             st.subheader("Generated Images")
-            cols = st.columns(len(st.session_state.generated_images))
+    cols = st.columns(len(st.session_state.generated_images))
             for i, img in enumerate(st.session_state.generated_images):
                 with cols[i]:
                     st.image(img, caption=f"Image {i+1}", use_column_width=True)
