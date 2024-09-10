@@ -219,6 +219,16 @@ def create_video_from_images(images, fps, output_path):
     video.write_videofile(output_path, fps=fps, codec="libx264")
     return output_path
 
+def display_images_in_grid(images, columns=3):
+    """Display images in a grid layout with captions."""
+    for i in range(0, len(images), columns):
+        cols = st.columns(columns)
+        for j in range(columns):
+            if i + j < len(images):
+                with cols[j]:
+                    st.image(images[i + j], use_column_width=True, caption=f"Image {i + j + 1}")
+                    st.markdown(f"<p style='text-align: center;'>Image {i + j + 1}</p>", unsafe_allow_html=True)
+
 def main():
     st.set_page_config(page_title="Stable Diffusion Longform Video Creator", layout="wide")
 
@@ -298,6 +308,7 @@ def main():
                         output_path = "snapshot_video.mp4"
                         final_video_path = create_video_from_images(images, fps, output_path)
                         st.session_state.final_video = final_video_path
+                        st.session_state.generated_videos.append(final_video_path)  # Add this line
                         st.success(f"Snapshot Mode video created: {final_video_path}")
                     else:
                         st.error("Failed to generate images for Snapshot Mode.")
@@ -403,10 +414,7 @@ def main():
     with tab2:
         st.subheader("Generated Images")
         if st.session_state.generated_images:
-            cols = st.columns(len(st.session_state.generated_images))
-            for i, img in enumerate(st.session_state.generated_images):
-                with cols[i]:
-                    st.image(img, caption=f"Image {i+1}", use_column_width=True)
+            display_images_in_grid(st.session_state.generated_images)
         else:
             st.write("No images generated yet. Use the Generator tab to create images.")
 
@@ -417,6 +425,10 @@ def main():
                 if os.path.exists(video_path):
                     st.video(video_path)
                     st.write(f"Video Segment {i+1}")
+                    with open(video_path, "rb") as f:
+                        st.download_button(f"Download Video Segment {i+1}", f, file_name=f"video_segment_{i+1}.mp4")
+                else:
+                    st.error(f"Video file not found: {video_path}")
             
             if st.session_state.final_video and os.path.exists(st.session_state.final_video):
                 st.subheader("Final Longform Video")
