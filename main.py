@@ -162,16 +162,26 @@ def concatenate_videos(video_clips, crossfade_duration=0):
     try:
         st.write(f"Attempting to concatenate {len(valid_clips)} valid clips")
         
+        # Trim the last frame from all clips except the last one
+        trimmed_clips = []
+        for i, clip in enumerate(valid_clips):
+            if i < len(valid_clips) - 1:
+                # Subtract a small duration (e.g., 1/30 second) to remove approximately one frame
+                trimmed_clip = clip.subclip(0, clip.duration - 1/30)
+                trimmed_clips.append(trimmed_clip)
+            else:
+                trimmed_clips.append(clip)
+        
         if crossfade_duration > 0:
             st.write(f"Applying crossfade of {crossfade_duration} seconds")
             # Apply crossfade transition
             final_clips = []
-            for i, clip in enumerate(valid_clips):
+            for i, clip in enumerate(trimmed_clips):
                 if i == 0:
                     final_clips.append(clip)
                 else:
                     # Create a crossfade transition
-                    fade_out = valid_clips[i-1].fx(vfx.fadeout, duration=crossfade_duration)
+                    fade_out = trimmed_clips[i-1].fx(vfx.fadeout, duration=crossfade_duration)
                     fade_in = clip.fx(vfx.fadein, duration=crossfade_duration)
                     transition = CompositeVideoClip([fade_out, fade_in])
                     transition = transition.set_duration(crossfade_duration)
@@ -182,7 +192,7 @@ def concatenate_videos(video_clips, crossfade_duration=0):
             
             final_video = concatenate_videoclips(final_clips)
         else:
-            final_video = concatenate_videoclips(valid_clips)
+            final_video = concatenate_videoclips(trimmed_clips)
         
         st.write(f"Concatenation successful. Final video duration: {final_video.duration} seconds")
         return final_video, valid_clips
