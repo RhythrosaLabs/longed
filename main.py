@@ -231,18 +231,29 @@ def display_images_in_grid(images, columns=3):
                     st.markdown(f"<p style='text-align: center;'>Image {i + j + 1}</p>", unsafe_allow_html=True)
 
 def create_zip_file(images, videos, output_path="generated_content.zip"):
-    with zipfile.ZipFile(output_path, 'w') as zipf:
-        for i, img in enumerate(images):
-            img_path = f"image_{i+1}.png"
-            img.save(img_path)
-            zipf.write(img_path)
-            os.remove(img_path)
+    if not images and not videos:
+        st.error("No images or videos to create a zip file.")
+        return None
+
+    try:
+        with zipfile.ZipFile(output_path, 'w') as zipf:
+            for i, img in enumerate(images):
+                img_path = f"image_{i+1}.png"
+                img.save(img_path)
+                zipf.write(img_path)
+                os.remove(img_path)
+            
+            for video in videos:
+                if os.path.exists(video):
+                    zipf.write(video)
+                else:
+                    st.warning(f"Video file not found: {video}")
         
-        for video in videos:
-            if os.path.exists(video):
-                zipf.write(video)
-    
-    return output_path
+        return output_path
+    except Exception as e:
+        st.error(f"Error creating zip file: {str(e)}")
+        return None
+
 
 def snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id, seed):
     st.write("Generating initial image for Snapshot Mode v2...")
