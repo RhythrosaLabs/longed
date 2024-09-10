@@ -205,6 +205,9 @@ def concatenate_videos(video_clips, crossfade_duration=0):
 def main():
     st.set_page_config(page_title="Stable Diffusion Longform Video Creator", layout="wide")
 
+    st.sidebar.title("API Key")
+    api_key = st.sidebar.text_input("Enter your Stability AI API Key", type="password")
+
     # Sidebar
     st.sidebar.title("About")
     st.sidebar.info(
@@ -243,9 +246,6 @@ Please be aware that using the Stability AI API for generating images and videos
 - **Optimizations**: Improvements to the video generation and concatenation process for better performance.
         """
     )
-    
-    st.sidebar.title("API Key")
-    api_key = st.sidebar.text_input("Enter your Stability AI API Key", type="password")
 
     # Main content
     st.title("Stable Diffusion Longform Video Creator")
