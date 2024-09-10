@@ -6,22 +6,20 @@ import io
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 import os
 import sys
-import numpy as np  # Add this import
+import numpy as np
 import time
 
 # Redirect stderr to stdout to avoid issues with logging in some environments
 sys.stderr = sys.stdout
 
-# Function to resize image to supported dimensions
 def resize_image(image):
     width, height = image.size
     if (width, height) in [(1024, 576), (576, 1024), (768, 768)]:
-        return image  # Return if image already has valid dimensions
+        return image
     else:
         st.warning("Resizing image to 768x768 (default)")
-        return image.resize((768, 768))  # Default resize
+        return image.resize((768, 768))
 
-# Function to generate image from text prompt
 def generate_image_from_text(api_key, prompt):
     url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"
     headers = {
@@ -38,7 +36,7 @@ def generate_image_from_text(api_key, prompt):
     }
     try:
         response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response.raise_for_status()
         image_data = response.json()['artifacts'][0]['base64']
         image = Image.open(io.BytesIO(base64.b64decode(image_data)))
         return image
@@ -46,27 +44,22 @@ def generate_image_from_text(api_key, prompt):
         st.error(f"Error generating image: {str(e)}")
         return None
 
-# Function to start video generation
 def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, seed=0):
     url = "https://api.stability.ai/v2beta/image-to-video"
     headers = {
         "Authorization": f"Bearer {api_key}"
     }
-
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format='PNG')
     img_byte_arr = img_byte_arr.getvalue()
-
     files = {
         "image": ("image.png", img_byte_arr, "image/png")
     }
-
     data = {
         "seed": str(seed),
         "cfg_scale": str(cfg_scale),
         "motion_bucket_id": str(motion_bucket_id)
     }
-
     try:
         response = requests.post(url, headers=headers, files=files, data=data)
         response.raise_for_status()
@@ -75,21 +68,19 @@ def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, 
         st.error(f"Error starting video generation: {str(e)}")
         return None
 
-# Function to poll for video generation result
 def poll_for_video(api_key, generation_id):
     url = f"https://api.stability.ai/v2beta/image-to-video/result/{generation_id}"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Accept": "video/*"
     }
-
-    max_attempts = 60  # Limit the number of polling attempts
+    max_attempts = 60
     for attempt in range(max_attempts):
         try:
             response = requests.get(url, headers=headers)
             if response.status_code == 202:
                 st.write(f"Video generation in progress... Polling attempt {attempt + 1}/{max_attempts}")
-                time.sleep(10)  # Wait for 10 seconds before polling again
+                time.sleep(10)
             elif response.status_code == 200:
                 return response.content
             else:
@@ -97,14 +88,18 @@ def poll_for_video(api_key, generation_id):
         except requests.exceptions.RequestException as e:
             st.error(f"Error polling for video: {str(e)}")
             return None
-    
     st.error("Video generation timed out. Please try again.")
     return None
 
-# Function to validate if a video segment is valid (i.e., not corrupted)
 def validate_video_clip(video_path):
+    if not os.path.exists(video_path):
+        st.error(f"Video file not found: {video_path}")
+        return False
     try:
         clip = VideoFileClip(video_path)
+        if clip is None:
+            st.error(f"Failed to load video clip: {video_path}")
+            return False
         duration = clip.duration
         clip.close()
         return duration > 0
@@ -112,12 +107,18 @@ def validate_video_clip(video_path):
         st.error(f"Invalid video segment: {video_path}, Error: {str(e)}")
         return False
 
-# Function to ensure concatenation of valid videos only
 def concatenate_videos(video_clips):
     valid_clips = []
     for clip_path in video_clips:
         if validate_video_clip(clip_path):
-            valid_clips.append(VideoFileClip(clip_path))
+            try:
+                clip = VideoFileClip(clip_path)
+                if clip is not None and clip.duration > 0:
+                    valid_clips.append(clip)
+                else:
+                    st.warning(f"Skipping invalid clip: {clip_path}")
+            except Exception as e:
+                st.warning(f"Error loading clip {clip_path}: {str(e)}")
 
     if not valid_clips:
         st.error("No valid video segments found. Unable to concatenate.")
@@ -132,11 +133,20 @@ def concatenate_videos(video_clips):
         st.error(f"Error concatenating videos: {str(e)}")
         return None
 
-# Function to extract the last frame from a video and convert it to an image
 def get_last_frame_image(video_path):
+    if not os.path.exists(video_path):
+        st.error(f"Video file not found: {video_path}")
+        return None
     try:
         video_clip = VideoFileClip(video_path)
-        last_frame = video_clip.get_frame(video_clip.duration - 0.001)  # Get frame slightly before end
+        if video_clip is None:
+            st.error(f"Failed to load video clip: {video_path}")
+            return None
+        if video_clip.duration <= 0:
+            st.error(f"Invalid video duration for {video_path}")
+            video_clip.close()
+            return None
+        last_frame = video_clip.get_frame(video_clip.duration - 0.001)
         last_frame_image = Image.fromarray(np.uint8(last_frame)).convert('RGB')
         video_clip.close()
         return last_frame_image
@@ -144,7 +154,6 @@ def get_last_frame_image(video_path):
         st.error(f"Error extracting last frame from {video_path}: {str(e)}")
         return None
 
-# Streamlit UI
 def main():
     st.title("Stable Diffusion Longform Video Creator")
 
@@ -184,6 +193,7 @@ def main():
                 image = Image.open(image_file)
 
             image = resize_image(image)
+            st.image(image, caption="Input image for video generation")
 
             video_clips = []
             current_image = image
@@ -199,11 +209,15 @@ def main():
                         video_path = f"video_segment_{i+1}.mp4"
                         with open(video_path, "wb") as f:
                             f.write(video_content)
+                        st.write(f"Saved video segment to {video_path}")
+                        st.write(f"File exists: {os.path.exists(video_path)}")
+                        st.write(f"File size: {os.path.getsize(video_path)} bytes")
                         video_clips.append(video_path)
 
                         last_frame_image = get_last_frame_image(video_path)
                         if last_frame_image:
                             current_image = last_frame_image
+                            st.image(current_image, caption=f"Last frame of segment {i+1}")
                         else:
                             st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
                     else:
@@ -223,7 +237,11 @@ def main():
                         st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
                 
                 for video_file in video_clips:
-                    os.remove(video_file)
+                    if os.path.exists(video_file):
+                        os.remove(video_file)
+                        st.write(f"Removed temporary file: {video_file}")
+                    else:
+                        st.warning(f"Could not find file to remove: {video_file}")
             else:
                 st.error("No video segments were successfully generated.")
 
