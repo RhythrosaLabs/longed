@@ -9,6 +9,7 @@ import sys
 import numpy as np
 import time
 import traceback
+import zipfile
 
 # Redirect stderr to stdout to avoid issues with logging in some environments
 sys.stderr = sys.stdout
