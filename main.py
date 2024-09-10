@@ -7,6 +7,7 @@ from moviepy.editor import VideoFileClip, concatenate_videoclips
 import os
 import sys
 import numpy as np  # Add this import
+import time
 
 # Redirect stderr to stdout to avoid issues with logging in some environments
 sys.stderr = sys.stdout
