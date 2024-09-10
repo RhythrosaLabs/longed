@@ -21,7 +21,122 @@ if 'generated_videos' not in st.session_state:
 if 'final_video' not in st.session_state:
     st.session_state.final_video = None
 
-# ... [Previous functions remain the same: resize_image, generate_image_from_text, start_video_generation, poll_for_video, validate_video_clip, get_last_frame_image] ...
+def resize_image(image):
+    width, height = image.size
+    if (width, height) in [(1024, 576), (576, 1024), (768, 768)]:
+        return image
+    else:
+        st.warning("Resizing image to 768x768 (default)")
+        return image.resize((768, 768))
+
+def generate_image_from_text(api_key, prompt):
+    url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "text_prompts": [{"text": prompt}],
+        "cfg_scale": 7,
+        "height": 768,
+        "width": 768,
+        "samples": 1,
+        "steps": 30,
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        image_data = response.json()['artifacts'][0]['base64']
+        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+        return image
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error generating image: {str(e)}")
+        return None
+
+def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, seed=0):
+    url = "https://api.stability.ai/v2beta/image-to-video"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='PNG')
+    img_byte_arr = img_byte_arr.getvalue()
+    files = {
+        "image": ("image.png", img_byte_arr, "image/png")
+    }
+    data = {
+        "seed": str(seed),
+        "cfg_scale": str(cfg_scale),
+        "motion_bucket_id": str(motion_bucket_id)
+    }
+    try:
+        response = requests.post(url, headers=headers, files=files, data=data)
+        response.raise_for_status()
+        return response.json().get('id')
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error starting video generation: {str(e)}")
+        return None
+
+def poll_for_video(api_key, generation_id):
+    url = f"https://api.stability.ai/v2beta/image-to-video/result/{generation_id}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "video/*"
+    }
+    max_attempts = 60
+    for attempt in range(max_attempts):
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 202:
+                st.write(f"Video generation in progress... Polling attempt {attempt + 1}/{max_attempts}")
+                time.sleep(10)
+            elif response.status_code == 200:
+                return response.content
+            else:
+                response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Error polling for video: {str(e)}")
+            return None
+    st.error("Video generation timed out. Please try again.")
+    return None
+
+def validate_video_clip(video_path):
+    if not os.path.exists(video_path):
+        st.error(f"Video file not found: {video_path}")
+        return False
+    try:
+        clip = VideoFileClip(video_path)
+        if clip is None:
+            st.error(f"Failed to load video clip: {video_path}")
+            return False
+        duration = clip.duration
+        clip.close()
+        st.write(f"Validated video clip: {video_path}, Duration: {duration} seconds")
+        return duration > 0
+    except Exception as e:
+        st.error(f"Invalid video segment: {video_path}, Error: {str(e)}")
+        return False
+
+def get_last_frame_image(video_path):
+    if not os.path.exists(video_path):
+        st.error(f"Video file not found: {video_path}")
+        return None
+    try:
+        video_clip = VideoFileClip(video_path)
+        if video_clip is None:
+            st.error(f"Failed to load video clip: {video_path}")
+            return None
+        if video_clip.duration <= 0:
+            st.error(f"Invalid video duration for {video_path}")
+            video_clip.close()
+            return None
+        last_frame = video_clip.get_frame(video_clip.duration - 0.001)
+        last_frame_image = Image.fromarray(np.uint8(last_frame)).convert('RGB')
+        video_clip.close()
+        return last_frame_image
+    except Exception as e:
+        st.error(f"Error extracting last frame from {video_path}: {str(e)}")
+        return None
 
 def concatenate_videos(video_clips, crossfade_duration=0):
     valid_clips = []
