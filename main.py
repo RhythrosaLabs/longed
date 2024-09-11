@@ -257,17 +257,23 @@ def create_zip_file(images, videos, output_path="generated_content.zip"):
 
 def snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id, seed):
     st.write("Generating initial image for Snapshot Mode v2...")
+    
+    # Step 1: Generate the first image from the prompt.
     initial_image = generate_image_from_text(api_key, prompt)
     if initial_image is None:
         return None, None
 
+    # Store the initial image in session state
     st.session_state.generated_images.append(initial_image)
     
     video_clips = []
     current_image = initial_image
 
+    # Step 2: Generate video segments using the initial image as a guide.
     for i in range(num_segments):
         st.write(f"Generating video segment {i+1}/{num_segments}...")
+
+        # Pass the current image as the guiding image for the next segment.
         generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
 
         if generation_id:
@@ -281,6 +287,7 @@ def snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id,
                 video_clips.append(video_path)
                 st.session_state.generated_videos.append(video_path)
 
+                # Extract the last frame of the current video and use it as the guiding image for the next segment.
                 last_frame_image = get_last_frame_image(video_path)
                 if last_frame_image:
                     current_image = last_frame_image
@@ -293,6 +300,7 @@ def snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id,
             st.error(f"Failed to start video generation for segment {i+1}.")
 
     return video_clips, initial_image
+
 
 def main():
     st.set_page_config(page_title="Stable Diffusion Longform Video Creator", layout="wide")
