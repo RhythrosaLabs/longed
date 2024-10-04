@@ -1,415 +1,239 @@
 import os
-import threading
-import tempfile
-import time
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-from moviepy.editor import (
-    ImageClip, 
-    concatenate_videoclips, 
-    AudioFileClip, 
-    CompositeVideoClip, 
-    TextClip, 
-    CompositeAudioClip
-)
-from moviepy.video.fx.all import fadein, fadeout
-from PIL import Image
 import streamlit as st
+import tempfile
+from PIL import Image
+from moviepy.editor import (
+    ImageClip,
+    concatenate_videoclips,
+    VideoFileClip,
+    TextClip,
+    CompositeVideoClip,
+    AudioFileClip,
+)
+import replicate
+from stability_sdk import client
+import stability_sdk.interfaces.gooseai.generation.generation_pb2 as generation
 
 # ============================
-# Configuration Defaults
+# Helper Functions
 # ============================
 
-DEFAULT_SNAPSHOT_DIR = 'snapshots'
-DEFAULT_OUTPUT_DIR = 'output'
-DEFAULT_ASSETS_DIR = 'assets'
-DEFAULT_FRAME_RATE = 24.0
-DEFAULT_TRANSITION_DURATION = 1.0  # seconds
-DEFAULT_VIDEO_DURATION = 2.0  # seconds per image
-DEFAULT_VIDEO_CODEC = 'libx264'
-DEFAULT_VIDEO_FORMAT = 'mp4'
-DEFAULT_OUTPUT_VIDEO = os.path.join(DEFAULT_OUTPUT_DIR, 'output_video.mp4')
-DEFAULT_AUDIO_FILE = os.path.join(DEFAULT_ASSETS_DIR, 'background_music.mp3')
-DEFAULT_FONT = 'Arial'  # Default system font
+def remove_background_replicate(api_key, image_path):
+    """
+    Remove background from an image using Replicate's removebg model.
+    """
+    os.environ["REPLICATE_API_TOKEN"] = api_key
+    model = replicate.models.get("joshshorer/remove-bg")
+    version = model.versions.get("97543df48a5c1044935bfeb501a7a832cd5e7a54")
+    output = version.predict(image=open(image_path, "rb"))
+    return output
 
-# Supported Image Formats
-IMAGE_FORMATS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
+def apply_filter_replicate(api_key, image_path, filter_type):
+    """
+    Apply a filter to an image using Replicate's style transfer models.
+    """
+    os.environ["REPLICATE_API_TOKEN"] = api_key
+    if filter_type == "Artistic":
+        model = replicate.models.get("jamesroutley/cyberpunk")
+        version = model.versions.get("a93eab4d32c12a154d3c7d9e0e126b54fa7efc3e")
+    elif filter_type == "Vintage":
+        model = replicate.models.get("rinarppar/nostalgic")
+        version = model.versions.get("c3f63d2d4d2b4a9d1e2f1e0a8c1b3a2d4e5f6g7h")
+    else:
+        st.error("Unsupported filter type.")
+        return None
+    output = version.predict(image=open(image_path, "rb"))
+    return output
 
-# Ensure necessary directories exist
-for directory in [DEFAULT_SNAPSHOT_DIR, DEFAULT_OUTPUT_DIR, DEFAULT_ASSETS_DIR]:
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+def add_text_overlay(video_clip, text, position, fontsize, color, font):
+    """
+    Add text overlay to a video clip.
+    """
+    txt_clip = TextClip(text, fontsize=fontsize, color=color, font=font)
+    txt_clip = txt_clip.set_position(position).set_duration(video_clip.duration)
+    video = CompositeVideoClip([video_clip, txt_clip])
+    return video
 
-# ============================
-# Video Generator Class
-# ============================
-
-class VideoGenerator:
-    """Handles video creation from images with optional transitions, text overlays, and background music."""
-    
-    def __init__(self, snapshot_dir, output_dir, assets_dir, output_video, frame_rate,
-                 transition_duration, video_duration, video_codec, video_format,
-                 audio_file, font_path, enable_transitions, enable_audio, enable_text,
-                 text_content, text_position, text_fontsize, text_color):
-        self.snapshot_dir = snapshot_dir
-        self.output_dir = output_dir
-        self.assets_dir = assets_dir
-        self.output_video = output_video
-        self.frame_rate = frame_rate
-        self.transition_duration = transition_duration
-        self.video_duration = video_duration
-        self.video_codec = video_codec
-        self.video_format = video_format
-        self.audio_file = audio_file
-        self.font_path = font_path if font_path else DEFAULT_FONT
-        self.enable_transitions = enable_transitions
-        self.enable_audio = enable_audio
-        self.enable_text = enable_text
-        self.text_content = text_content
-        self.text_position = text_position
-        self.text_fontsize = text_fontsize
-        self.text_color = text_color
-
-    def get_sorted_image_paths(self):
-        """Retrieve and sort image paths from the snapshot directory."""
-        try:
-            images = [img for img in os.listdir(self.snapshot_dir) if img.lower().endswith(IMAGE_FORMATS)]
-            images.sort()  # Sort images by name; modify if necessary
-            image_paths = [os.path.join(self.snapshot_dir, img) for img in images]
-            return image_paths
-        except Exception as e:
-            st.error(f"Error accessing snapshot directory: {e}")
-            return []
-
-    def create_video(self, image_paths, progress_callback=None):
-        """Create a video from image paths with optional transitions and text overlays."""
-        if not image_paths:
-            if progress_callback:
-                progress_callback(0)
-            st.warning("No images found to create a video.")
-            return
-
-        clips = []
-        total_images = len(image_paths)
-
-        for idx, img_path in enumerate(image_paths):
-            try:
-                img = Image.open(img_path)
-                width, height = img.size
-                img.close()
-                
-                # Create ImageClip
-                clip = ImageClip(img_path).set_duration(self.video_duration)
-                
-                # Add text overlay if enabled
-                if self.enable_text and self.text_content:
-                    txt_clip = TextClip(
-                        self.text_content,
-                        fontsize=self.text_fontsize,
-                        color=self.text_color,
-                        font=self.font_path
-                    ).set_position(self.text_position).set_duration(self.video_duration)
-                    clip = CompositeVideoClip([clip, txt_clip])
-                
-                # Add fade in and fade out transitions
-                if self.enable_transitions:
-                    clip = clip.fx(fadein, self.transition_duration).fx(fadeout, self.transition_duration)
-                
-                clips.append(clip)
-                
-                # Update progress
-                if progress_callback:
-                    progress = (idx + 1) / total_images
-                    progress_callback(progress)
-                    
-            except Exception as e:
-                st.error(f"Error processing image {img_path}: {e}")
-                continue
-
-        # Concatenate clips
-        try:
-            final_clip = concatenate_videoclips(clips, method="compose")
-        except Exception as e:
-            st.error(f"Error concatenating video clips: {e}")
-            return
-        
-        # Add background audio if enabled
-        if self.enable_audio and os.path.exists(self.audio_file):
-            try:
-                audio_clip = AudioFileClip(self.audio_file).subclip(0, final_clip.duration)
-                final_audio = CompositeAudioClip([audio_clip])
-                final_clip = final_clip.set_audio(final_audio)
-            except Exception as e:
-                st.error(f"Error adding audio: {e}")
-        
-        # Write the video file
-        try:
-            final_clip.write_videofile(
-                self.output_video,
-                fps=self.frame_rate,
-                codec=self.video_codec,
-                audio_codec='aac' if self.enable_audio else None,
-                temp_audiofile='temp-audio.m4a',
-                remove_temp=True,
-                verbose=False,
-                logger=None
-            )
-            st.success(f"Video successfully saved at `{self.output_video}`")
-        except Exception as e:
-            st.error(f"Error writing video file: {e}")
-        finally:
-            final_clip.close()
+def concatenate_videos(video_paths, output_path):
+    """
+    Concatenate multiple video files into one.
+    """
+    clips = [VideoFileClip(video) for video in video_paths]
+    final_clip = concatenate_videoclips(clips)
+    final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
+    final_clip.close()
 
 # ============================
-# Watchdog Handler Class
-# ============================
-
-class VideoGeneratorHandler(FileSystemEventHandler):
-    """Handles new image files and updates the video."""
-    
-    def __init__(self, generator, progress_callback=None):
-        super().__init__()
-        self.generator = generator
-        self.progress_callback = progress_callback
-        self.lock = threading.Lock()
-        self.update_triggered = False
-
-    def on_created(self, event):
-        if not event.is_directory and event.src_path.lower().endswith(IMAGE_FORMATS):
-            with self.lock:
-                if not self.update_triggered:
-                    self.update_triggered = True
-                    threading.Thread(target=self.update_video).start()
-
-    def on_modified(self, event):
-        if not event.is_directory and event.src_path.lower().endswith(IMAGE_FORMATS):
-            with self.lock:
-                if not self.update_triggered:
-                    self.update_triggered = True
-                    threading.Thread(target=self.update_video).start()
-
-    def update_video(self):
-        self.generator.create_video(self.generator.get_sorted_image_paths(), self.progress_callback)
-        with self.lock:
-            self.update_triggered = False
-
-# ============================
-# Streamlit App
+# Streamlit Application
 # ============================
 
 def main():
-    st.set_page_config(page_title="🔥 Super Bad Ass Video Generator and Editor 🔥", layout="wide")
-    st.title("🔥 **Super Bad Ass Video Generator and Editor** 🔥")
-    
-    # Initialize session state
-    if 'observer' not in st.session_state:
-        st.session_state.observer = None
-    if 'handler' not in st.session_state:
-        st.session_state.handler = None
-    if 'generator' not in st.session_state:
-        st.session_state.generator = None
-    if 'running' not in st.session_state:
-        st.session_state.running = False
+    st.set_page_config(page_title="🔥 Bad Ass Video Generator & Editor 🔥", layout="wide")
+    st.title("🔥 **Bad Ass Video Generator & Editor** 🔥")
 
-    # Sidebar for configuration
-    st.sidebar.header("⚙️ Configuration")
-    
-    # Snapshot Directory
-    snapshot_dir = st.sidebar.text_input("📸 Snapshots Directory", DEFAULT_SNAPSHOT_DIR)
-    
-    # Output Directory
-    output_dir = st.sidebar.text_input("📂 Output Directory", DEFAULT_OUTPUT_DIR)
-    
-    # Assets Directory
-    assets_dir = st.sidebar.text_input("🎨 Assets Directory", DEFAULT_ASSETS_DIR)
-    
-    # Output Video File
-    video_filename = st.sidebar.text_input("🎥 Output Video Filename", "output_video.mp4")
-    video_format = st.sidebar.selectbox("📄 Video Format", ['mp4', 'avi', 'webm'], index=0)
-    output_video = os.path.join(output_dir, video_filename)
-    if not output_video.endswith(f".{video_format}"):
-        output_video += f".{video_format}"
-    
-    # Frame Rate
-    frame_rate = st.sidebar.slider("⏱️ Frame Rate (fps)", 1.0, 60.0, DEFAULT_FRAME_RATE, 0.1)
-    
-    # Transition Duration
-    transition_duration = st.sidebar.slider(
-        "🔄 Transition Duration (s)", 
-        0.1, 
-        5.0, 
-        DEFAULT_TRANSITION_DURATION, 
-        0.1,
-        key='transition_duration_slider'
-    )
-    
-    # Video Duration per Image
-    video_duration = st.sidebar.slider(
-        "⏳ Duration per Image (s)", 
-        1.0, 
-        10.0, 
-        DEFAULT_VIDEO_DURATION, 
-        0.5,
-        key='video_duration_slider'
-    )
-    
-    # Video Codec
-    video_codec = st.sidebar.selectbox("🖥️ Video Codec", ['libx264', 'mpeg4', 'libvpx'], index=0)
-    
-    # Background Audio File
-    audio_file = st.sidebar.file_uploader("🎵 Upload Background Audio File", type=['mp3', 'wav', 'aac', 'm4a'])
-    if audio_file:
-        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file.name)[1])
-        temp_audio.write(audio_file.read())
-        temp_audio.close()
-        audio_file_path = temp_audio.name
-    else:
-        audio_file_path = DEFAULT_AUDIO_FILE  # Default path
-    
-    # Font File
-    font_file = st.sidebar.file_uploader("🅰️ Upload Font File (optional)", type=['ttf', 'otf'])
-    if font_file:
-        temp_font = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(font_file.name)[1])
-        temp_font.write(font_file.read())
-        temp_font.close()
-        font_path = temp_font.name
-    else:
-        font_path = None  # Use default system font
-    
-    # Enable Transitions
-    enable_transitions = st.sidebar.checkbox("🔁 Enable Transitions", value=True)
-    
-    # Enable Audio
-    enable_audio = st.sidebar.checkbox("🔊 Enable Background Audio", value=True)
-    
-    # Enable Text Overlay
-    enable_text = st.sidebar.checkbox("✏️ Enable Text Overlay", value=False)
-    
-    # Text Overlay Options
-    if enable_text:
-        text_content = st.sidebar.text_input("📝 Text Content", "Sample Text")
-        text_position = st.sidebar.selectbox("📍 Text Position", ['top', 'center', 'bottom', 'left', 'right'], index=1)
-        text_fontsize = st.sidebar.slider("🔤 Text Font Size", 10, 100, 24, step=1)
-        text_color = st.sidebar.color_picker("🎨 Text Color", "#FFFFFF")
-    else:
-        text_content = ""
-        text_position = "bottom"
-        text_fontsize = 24
-        text_color = "#FFFFFF"
-    
-    # Progress Bar
-    progress_bar = st.progress(0)
-    progress_text = st.empty()
-    
-    # Function to update progress
-    def update_progress(progress):
-        progress_bar.progress(progress)
-        progress_text.text(f"Processing... {int(progress * 100)}%")
-    
-    # Start Video Generation and Monitoring
-    if st.sidebar.button("🚀 Start Video Generation and Monitoring"):
-        if st.session_state.running:
-            st.warning("Video generation and monitoring is already running.")
-        else:
-            # Validate directories
-            if not os.path.exists(snapshot_dir):
-                st.error(f"Snapshot directory does not exist: `{snapshot_dir}`")
-            elif not os.path.exists(output_dir):
-                try:
-                    os.makedirs(output_dir)
-                    st.warning(f"Output directory created: `{output_dir}`")
-                except Exception as e:
-                    st.error(f"Error creating output directory: {e}")
-            elif not os.path.exists(assets_dir):
-                try:
-                    os.makedirs(assets_dir)
-                    st.warning(f"Assets directory created: `{assets_dir}`")
-                except Exception as e:
-                    st.error(f"Error creating assets directory: {e}")
-            else:
-                # Initialize VideoGenerator
-                generator = VideoGenerator(
-                    snapshot_dir=snapshot_dir,
-                    output_dir=output_dir,
-                    assets_dir=assets_dir,
-                    output_video=output_video,
-                    frame_rate=frame_rate,
-                    transition_duration=transition_duration,
-                    video_duration=video_duration,
-                    video_codec=video_codec,
-                    video_format=video_format,
-                    audio_file=audio_file_path,
-                    font_path=font_path,
-                    enable_transitions=enable_transitions,
-                    enable_audio=enable_audio,
-                    enable_text=enable_text,
-                    text_content=text_content,
-                    text_position=text_position,
-                    text_fontsize=text_fontsize,
-                    text_color=text_color
-                )
-                
-                # Initial Video Creation
-                with st.spinner("Generating initial video..."):
-                    generator.create_video(generator.get_sorted_image_paths(), update_progress)
-                
-                # Set up Watchdog Handler and Observer
-                handler = VideoGeneratorHandler(generator, progress_callback=update_progress)
-                observer = Observer()
-                observer.schedule(handler, path=snapshot_dir, recursive=False)
-                observer.start()
-                
-                # Save to session state
-                st.session_state.observer = observer
-                st.session_state.handler = handler
-                st.session_state.generator = generator
-                st.session_state.running = True
-                
-                st.success("🛰️ Started monitoring snapshots directory for new images.")
-    
-    # Stop Video Generation and Monitoring
-    if st.sidebar.button("🛑 Stop Monitoring"):
-        if st.session_state.running:
-            try:
-                st.session_state.observer.stop()
-                st.session_state.observer.join()
-                st.session_state.running = False
-                st.success("🛑 Stopped monitoring snapshots directory.")
-            except Exception as e:
-                st.error(f"Error stopping observer: {e}")
-        else:
-            st.warning("Video generation and monitoring is not running.")
-    
-    # Display Output Video
-    if os.path.exists(output_video):
-        st.subheader("📹 Generated Video:")
-        video_file = open(output_video, "rb")
-        video_bytes = video_file.read()
-        st.video(video_bytes)
-    
-    # Display Instructions
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📌 **Instructions:**")
-    st.sidebar.markdown("""
-    1. **Snapshots Directory:** Ensure that your images are saved in the specified `snapshots` directory. Supported formats are PNG, JPG, JPEG, BMP, and TIFF.
-    2. **Assets Directory:** Place your background music (`.mp3`, `.wav`, etc.) and custom fonts (`.ttf`, `.otf`) in the `assets` directory or upload them via the sidebar.
-    3. **Configure Settings:** Use the sidebar to adjust frame rate, transition duration, video duration per image, video codec, format, and enable/disable features like transitions, audio, and text overlays.
-    4. **Start Monitoring:** Click on "🚀 Start Video Generation and Monitoring" to generate the initial video and begin watching for new images. The video will update automatically as new images are added to the `snapshots` directory.
-    5. **Stop Monitoring:** Click on "🛑 Stop Monitoring" to halt the directory watching process.
-    6. **View Video:** The generated video will be displayed within the app. You can also download it directly from the `output` directory.
+    st.markdown("""
+    Welcome to the **Bad Ass Video Generator & Editor**! This powerful tool allows you to create and edit videos with multiple features such as adding text overlays, removing backgrounds, applying filters, and more. Connect with Replicate and StabilityAI to harness advanced AI capabilities.
     """)
-    
-    # Cleanup Temporary Files on Exit
-    def cleanup():
-        if 'handler' in st.session_state and st.session_state.handler:
-            st.session_state.handler.update_triggered = False
-        if audio_file:
-            os.unlink(audio_file_path)
-        if font_file:
-            os.unlink(font_path)
-    
-    import atexit
-    atexit.register(cleanup)
+
+    # ============================
+    # API Key Inputs
+    # ============================
+    st.sidebar.header("🔑 API Keys")
+    replicate_api_key = st.sidebar.text_input("Replicate API Key", type="password")
+    stability_api_key = st.sidebar.text_input("StabilityAI API Key", type="password")
+
+    if not replicate_api_key or not stability_api_key:
+        st.sidebar.warning("Please enter both Replicate and StabilityAI API keys to proceed.")
+        st.stop()
+
+    # ============================
+    # File Uploads
+    # ============================
+    st.sidebar.header("📂 Upload Files")
+    uploaded_images = st.sidebar.file_uploader("Upload Images", type=["png", "jpg", "jpeg", "bmp", "tiff"], accept_multiple_files=True)
+    uploaded_videos = st.sidebar.file_uploader("Upload Videos", type=["mp4", "avi", "mov", "mkv"], accept_multiple_files=True)
+
+    # ============================
+    # Configuration Options
+    # ============================
+    st.sidebar.header("⚙️ Configuration")
+
+    # Mode Selection
+    mode = st.sidebar.selectbox("🎨 Select Mode", ["Add Text Overlay", "Remove Background", "Apply Filter", "Concatenate Videos", "Advanced Editing"])
+
+    # Add Text Overlay Configuration
+    if mode == "Add Text Overlay":
+        st.sidebar.subheader("✏️ Text Overlay Settings")
+        text = st.sidebar.text_input("📝 Text to Add", "Your Text Here")
+        position = st.sidebar.selectbox("📍 Position", ["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"])
+        fontsize = st.sidebar.slider("🔤 Font Size", 10, 100, 30)
+        color = st.sidebar.color_picker("🎨 Text Color", "#FFFFFF")
+        font = st.sidebar.text_input("🅰️ Font", "Arial")
+
+    # Remove Background Configuration
+    elif mode == "Remove Background":
+        st.sidebar.subheader("🖼️ Background Removal Settings")
+        bg_color = st.sidebar.color_picker("🎨 Background Color", "#000000")
+        output_format = st.sidebar.selectbox("📄 Output Format", ["png", "jpg"])
+
+    # Apply Filter Configuration
+    elif mode == "Apply Filter":
+        st.sidebar.subheader("🎨 Filter Settings")
+        filter_type = st.sidebar.selectbox("✨ Select Filter", ["Artistic", "Vintage"])
+        strength = st.sidebar.slider("💪 Filter Strength", 1, 10, 5)
+
+    # Concatenate Videos Configuration
+    elif mode == "Concatenate Videos":
+        st.sidebar.subheader("📽️ Concatenation Settings")
+        concat_order = st.sidebar.text_input("📋 Video Order (comma-separated indices, e.g., 1,2,3)")
+
+    # Advanced Editing Configuration
+    elif mode == "Advanced Editing":
+        st.sidebar.subheader("🛠️ Advanced Editing Settings")
+        # Placeholder for additional advanced settings
+        st.sidebar.info("Advanced editing features coming soon!")
+
+    # ============================
+    # Processing Button
+    # ============================
+    if st.sidebar.button("🚀 Process"):
+        if mode == "Add Text Overlay":
+            if not uploaded_videos:
+                st.error("Please upload at least one video to add text overlays.")
+            else:
+                for video_file in uploaded_videos:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+                        tmp_video.write(video_file.read())
+                        tmp_video_path = tmp_video.name
+                    video = VideoFileClip(tmp_video_path)
+                    video = add_text_overlay(video, text, position, fontsize, color, font)
+                    output_path = os.path.join("output", f"text_overlay_{os.path.basename(tmp_video_path)}")
+                    video.write_videofile(output_path, codec="libx264", audio_codec="aac")
+                    video.close()
+                    st.success(f"Text overlay added and video saved to `{output_path}`")
+
+        elif mode == "Remove Background":
+            if not uploaded_images:
+                st.error("Please upload at least one image to remove backgrounds.")
+            else:
+                for image_file in uploaded_images:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(image_file.name)[1]) as tmp_image:
+                        tmp_image.write(image_file.read())
+                        tmp_image_path = tmp_image.name
+                    output = remove_background_replicate(replicate_api_key, tmp_image_path)
+                    output_path = os.path.join("output", f"no_bg_{os.path.basename(tmp_image_path)}.{output_format}")
+                    Image.open(output).save(output_path)
+                    st.success(f"Background removed and image saved to `{output_path}`")
+
+        elif mode == "Apply Filter":
+            if not uploaded_images:
+                st.error("Please upload at least one image to apply filters.")
+            else:
+                for idx, image_file in enumerate(uploaded_images):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(image_file.name)[1]) as tmp_image:
+                        tmp_image.write(image_file.read())
+                        tmp_image_path = tmp_image.name
+                    output = apply_filter_replicate(replicate_api_key, tmp_image_path, filter_type)
+                    output_path = os.path.join("output", f"filtered_{filter_type.lower()}_{idx}.{output_format}")
+                    Image.open(output).save(output_path)
+                    st.success(f"Filter applied and image saved to `{output_path}`")
+
+        elif mode == "Concatenate Videos":
+            if not uploaded_videos:
+                st.error("Please upload at least two videos to concatenate.")
+            else:
+                video_paths = []
+                for video_file in uploaded_videos:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+                        tmp_video.write(video_file.read())
+                        tmp_video_path = tmp_video.name
+                        video_paths.append(tmp_video_path)
+                if concat_order:
+                    try:
+                        order = [int(i)-1 for i in concat_order.split(",")]
+                        ordered_videos = [video_paths[i] for i in order]
+                    except:
+                        st.error("Invalid concatenation order. Please provide comma-separated numeric indices.")
+                        ordered_videos = video_paths
+                else:
+                    ordered_videos = video_paths
+                output_path = os.path.join("output", "concatenated_video.mp4")
+                concatenate_videos(ordered_videos, output_path)
+                st.success(f"Videos concatenated and saved to `{output_path}`")
+
+        elif mode == "Advanced Editing":
+            st.info("Advanced editing features are under development.")
+
+    # ============================
+    # Display Output Videos and Images
+    # ============================
+    st.header("📹 Output Videos and Images")
+
+    output_dir = "output"
+    if os.path.exists(output_dir):
+        output_files = os.listdir(output_dir)
+        if output_files:
+            for file in output_files:
+                file_path = os.path.join(output_dir, file)
+                if file.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
+                    st.subheader(f"🎥 {file}")
+                    video_bytes = open(file_path, "rb").read()
+                    st.video(video_bytes)
+                elif file.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tiff")):
+                    st.subheader(f"🖼️ {file}")
+                    st.image(file_path, use_column_width=True)
+        else:
+            st.info("No output files found. Process some files first!")
+    else:
+        st.info("No output directory found. Process some files first!")
+
+    # ============================
+    # Footer
+    # ============================
+    st.markdown("---")
+    st.markdown("""
+    **Bad Ass Video Generator & Editor** - Powered by [Replicate](https://replicate.com/) and [StabilityAI](https://stability.ai/).
+    """)
 
 if __name__ == "__main__":
     main()
