@@ -11,6 +11,8 @@ from moviepy.editor import (
     AudioFileClip,
 )
 import replicate
+import requests
+import numpy as np
 
 # ============================
 # Helper Functions
@@ -18,13 +20,19 @@ import replicate
 
 def remove_background_replicate(api_key, image_path):
     """
-    Remove background from an image using Replicate's remove-bg model.
+    Remove background from an image using Replicate's background removal model.
     """
-    os.environ["REPLICATE_API_TOKEN"] = api_key
     try:
+        # Set Replicate API Token
+        os.environ["REPLICATE_API_TOKEN"] = api_key
+
+        # Choose a background removal model. Example: remove-bg from joshshorer
         model = replicate.models.get("joshshorer/remove-bg")
-        version = model.versions.get("97543df48a5c1044935bfeb501a7a832cd5e7a54")
+        version = model.versions.get("97543df48a5c1044935bfeb501a7a832cd5e7a54")  # Replace with latest version ID
+
+        # Predict and get the output URL
         output_url = version.predict(image=open(image_path, "rb"))
+
         return output_url
     except Exception as e:
         st.error(f"Error removing background: {e}")
@@ -34,19 +42,25 @@ def apply_filter_replicate(api_key, image_path, filter_type):
     """
     Apply a filter to an image using Replicate's style transfer models.
     """
-    os.environ["REPLICATE_API_TOKEN"] = api_key
     try:
+        # Set Replicate API Token
+        os.environ["REPLICATE_API_TOKEN"] = api_key
+
         if filter_type == "Artistic":
+            # Example model: jamesroutley/cyberpunk
             model = replicate.models.get("jamesroutley/cyberpunk")
-            version = model.versions.get("a93eab4d32c12a154d3c7d9e0e126b54fa7efc3e")
+            version = model.versions.get("a93eab4d32c12a154d3c7d9e0e126b54fa7efc3e")  # Replace with latest version ID
         elif filter_type == "Vintage":
-            # Example model; replace with an actual vintage filter model from Replicate
-            model = replicate.models.get("basujindal/vintage")
-            version = model.versions.get("1f2d3e4g5h6i7j8k9l0m")
+            # Example model: stability-ai/stable-diffusion-v1-5
+            model = replicate.models.get("stability-ai/stable-diffusion")
+            version = model.versions.get("a1b2c3d4e5f6g7h8i9j0")  # Replace with actual version ID
         else:
             st.error("Unsupported filter type.")
             return None
+
+        # Predict and get the output URL
         output_url = version.predict(image=open(image_path, "rb"))
+
         return output_url
     except Exception as e:
         st.error(f"Error applying filter: {e}")
@@ -78,6 +92,23 @@ def concatenate_videos(video_paths, output_path):
     except Exception as e:
         st.error(f"Error concatenating videos: {e}")
 
+def download_image(url, save_path):
+    """
+    Download an image from a URL and save it locally.
+    """
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(save_path, "wb") as f:
+                f.write(response.content)
+            return True
+        else:
+            st.error(f"Failed to download image. Status code: {response.status_code}")
+            return False
+    except Exception as e:
+        st.error(f"Error downloading image: {e}")
+        return False
+
 # ============================
 # Streamlit Application
 # ============================
@@ -104,8 +135,16 @@ def main():
     # File Uploads
     # ============================
     st.sidebar.header("📂 Upload Files")
-    uploaded_images = st.sidebar.file_uploader("Upload Images", type=["png", "jpg", "jpeg", "bmp", "tiff"], accept_multiple_files=True)
-    uploaded_videos = st.sidebar.file_uploader("Upload Videos", type=["mp4", "avi", "mov", "mkv"], accept_multiple_files=True)
+    uploaded_images = st.sidebar.file_uploader(
+        "Upload Images for Processing (Background Removal / Apply Filters)",
+        type=["png", "jpg", "jpeg", "bmp", "tiff"],
+        accept_multiple_files=True,
+    )
+    uploaded_videos = st.sidebar.file_uploader(
+        "Upload Videos for Processing (Add Text Overlay / Concatenate)",
+        type=["mp4", "avi", "mov", "mkv"],
+        accept_multiple_files=True,
+    )
 
     # ============================
     # Configuration Options
@@ -113,13 +152,19 @@ def main():
     st.sidebar.header("⚙️ Configuration")
 
     # Mode Selection
-    mode = st.sidebar.selectbox("🎨 Select Mode", ["Add Text Overlay", "Remove Background", "Apply Filter", "Concatenate Videos", "Advanced Editing"])
+    mode = st.sidebar.selectbox(
+        "🎨 Select Mode",
+        ["Add Text Overlay", "Remove Background", "Apply Filter", "Concatenate Videos"],
+    )
 
     # Add Text Overlay Configuration
     if mode == "Add Text Overlay":
         st.sidebar.subheader("✏️ Text Overlay Settings")
         text = st.sidebar.text_input("📝 Text to Add", "Your Text Here")
-        position = st.sidebar.selectbox("📍 Position", ["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"])
+        position = st.sidebar.selectbox(
+            "📍 Position",
+            ["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"],
+        )
         fontsize = st.sidebar.slider("🔤 Font Size", 10, 100, 30)
         color = st.sidebar.color_picker("🎨 Text Color", "#FFFFFF")
         font = st.sidebar.text_input("🅰️ Font", "Arial")  # Ensure the font is available on the system
@@ -139,13 +184,7 @@ def main():
     # Concatenate Videos Configuration
     elif mode == "Concatenate Videos":
         st.sidebar.subheader("📽️ Concatenation Settings")
-        concat_order = st.sidebar.text_input("📋 Video Order (comma-separated indices, e.g., 1,2,3)")
-
-    # Advanced Editing Configuration
-    elif mode == "Advanced Editing":
-        st.sidebar.subheader("🛠️ Advanced Editing Settings")
-        # Placeholder for additional advanced settings
-        st.sidebar.info("Advanced editing features coming soon!")
+        concat_order = st.sidebar.text_input("📋 Video Order (comma-separated indices, e.g., 1,2,3)", "1,2,3")
 
     # ============================
     # Processing Button
@@ -159,16 +198,18 @@ def main():
             if not uploaded_videos:
                 st.error("Please upload at least one video to add text overlays.")
             else:
-                for video_file in uploaded_videos:
+                processed_video_paths = []
+                for idx, video_file in enumerate(uploaded_videos):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
                         tmp_video.write(video_file.read())
                         tmp_video_path = tmp_video.name
                     try:
                         video = VideoFileClip(tmp_video_path)
                         video = add_text_overlay(video, text, position, fontsize, color, font)
-                        output_path = os.path.join(output_dir, f"text_overlay_{os.path.basename(tmp_video_path)}")
+                        output_path = os.path.join(output_dir, f"text_overlay_{idx+1}.mp4")
                         video.write_videofile(output_path, codec="libx264", audio_codec="aac")
                         video.close()
+                        processed_video_paths.append(output_path)
                         st.success(f"Text overlay added and video saved to `{output_path}`")
                     except Exception as e:
                         st.error(f"Error processing video {video_file.name}: {e}")
@@ -177,25 +218,16 @@ def main():
             if not uploaded_images:
                 st.error("Please upload at least one image to remove backgrounds.")
             else:
-                for image_file in uploaded_images:
+                for idx, image_file in enumerate(uploaded_images):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(image_file.name)[1]) as tmp_image:
                         tmp_image.write(image_file.read())
                         tmp_image_path = tmp_image.name
-                    output = remove_background_replicate(replicate_api_key, tmp_image_path)
-                    if output:
-                        # Download the output image from the URL
-                        try:
-                            import requests
-                            response = requests.get(output)
-                            if response.status_code == 200:
-                                output_path = os.path.join(output_dir, f"no_bg_{os.path.splitext(image_file.name)[0]}.{output_format}")
-                                with open(output_path, "wb") as f:
-                                    f.write(response.content)
-                                st.success(f"Background removed and image saved to `{output_path}`")
-                            else:
-                                st.error(f"Failed to download processed image for `{image_file.name}`")
-                        except Exception as e:
-                            st.error(f"Error downloading processed image for `{image_file.name}`: {e}")
+                    output_url = remove_background_replicate(replicate_api_key, tmp_image_path)
+                    if output_url:
+                        # Download the processed image from the output URL
+                        success = download_image(output_url, os.path.join(output_dir, f"no_bg_{idx+1}.{output_format}"))
+                        if success:
+                            st.success(f"Background removed and image saved to `output/no_bg_{idx+1}.{output_format}`")
 
         elif mode == "Apply Filter":
             if not uploaded_images:
@@ -205,48 +237,35 @@ def main():
                     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(image_file.name)[1]) as tmp_image:
                         tmp_image.write(image_file.read())
                         tmp_image_path = tmp_image.name
-                    output = apply_filter_replicate(replicate_api_key, tmp_image_path, filter_type)
-                    if output:
-                        # Download the output image from the URL
-                        try:
-                            import requests
-                            response = requests.get(output)
-                            if response.status_code == 200:
-                                output_path = os.path.join(output_dir, f"filtered_{filter_type.lower()}_{idx}.{output_format}")
-                                with open(output_path, "wb") as f:
-                                    f.write(response.content)
-                                st.success(f"Filter applied and image saved to `{output_path}`")
-                            else:
-                                st.error(f"Failed to download processed image for `{image_file.name}`")
-                        except Exception as e:
-                            st.error(f"Error downloading processed image for `{image_file.name}`: {e}")
+                    output_url = apply_filter_replicate(replicate_api_key, tmp_image_path, filter_type)
+                    if output_url:
+                        # Download the processed image from the output URL
+                        success = download_image(output_url, os.path.join(output_dir, f"{filter_type.lower()}_{idx+1}.{output_format}"))
+                        if success:
+                            st.success(f"Filter applied and image saved to `output/{filter_type.lower()}_{idx+1}.{output_format}`")
 
         elif mode == "Concatenate Videos":
-            if not uploaded_videos:
+            if not uploaded_videos or len(uploaded_videos) < 2:
                 st.error("Please upload at least two videos to concatenate.")
             else:
                 video_paths = []
-                for video_file in uploaded_videos:
+                for idx, video_file in enumerate(uploaded_videos):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
                         tmp_video.write(video_file.read())
                         tmp_video_path = tmp_video.name
                         video_paths.append(tmp_video_path)
-                if concat_order:
-                    try:
-                        order = [int(i.strip())-1 for i in concat_order.split(",")]
-                        if any(i < 0 or i >= len(video_paths) for i in order):
-                            raise ValueError("Index out of range.")
-                        ordered_videos = [video_paths[i] for i in order]
-                    except Exception as e:
-                        st.error(f"Invalid concatenation order: {e}")
-                        ordered_videos = video_paths
-                else:
-                    ordered_videos = video_paths
+                # Process concatenation order
+                try:
+                    order = [int(i.strip()) - 1 for i in concat_order.split(",")]
+                    if any(i < 0 or i >= len(video_paths) for i in order):
+                        raise ValueError("Index out of range.")
+                    ordered_videos = [video_paths[i] for i in order]
+                except Exception as e:
+                    st.error(f"Invalid concatenation order: {e}")
+                    ordered_videos = video_paths  # Default to original order
+
                 output_path = os.path.join(output_dir, "concatenated_video.mp4")
                 concatenate_videos(ordered_videos, output_path)
-
-        elif mode == "Advanced Editing":
-            st.info("Advanced editing features are under development.")
 
     # ============================
     # Display Output Videos and Images
@@ -255,7 +274,7 @@ def main():
 
     output_dir = "output"
     if os.path.exists(output_dir):
-        output_files = os.listdir(output_dir)
+        output_files = sorted(os.listdir(output_dir))
         if output_files:
             for file in output_files:
                 file_path = os.path.join(output_dir, file)
@@ -267,9 +286,9 @@ def main():
                     st.subheader(f"🖼️ {file}")
                     st.image(file_path, use_column_width=True)
         else:
-            st.info("No output files found. Process some files first!")
+            st.info("No output files found. Please process some files first!")
     else:
-        st.info("No output directory found. Process some files first!")
+        st.info("No output directory found. Please process some files first!")
 
     # ============================
     # Footer
