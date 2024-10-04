@@ -6,3 +6,5 @@ moviepy
 numpy
 pillow
 replicate
+aiohttp
+nest_asyncio
