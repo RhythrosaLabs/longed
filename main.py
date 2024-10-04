@@ -37,16 +37,16 @@ for key in ['generated_images', 'generated_videos', 'final_video', 'audio_file']
 
 # Caching decorator for resizing images
 @st.cache_data(show_spinner=False)
-def cached_resize_image(image: Image.Image) -> Image.Image:
+def cached_resize_image(_image: Image.Image) -> Image.Image:
     """
     Resize the image to one of the supported dimensions or default to 768x768.
     """
     supported_sizes = [(1024, 576), (576, 1024), (768, 768)]
-    if image.size in supported_sizes:
-        return image
+    if _image.size in supported_sizes:
+        return _image
     else:
         st.warning("Resizing image to 768x768 (default)")
-        return image.resize((768, 768))
+        return _image.resize((768, 768))
 
 # Caching decorator for validating video clips
 @st.cache_resource
