@@ -236,6 +236,18 @@ def concatenate_videos(video_clips: list, crossfade_duration: float = 0.0) -> (V
             clip.close()
         return None, None
 
+def resize_video(final_video, newsize=(1920, 1080)):
+    """
+    Custom video resizing function using LANCZOS filter.
+    """
+    try:
+        final_video_resized = final_video.resize(newsize=newsize, apply_to="mask")
+        return final_video_resized
+    except Exception as e:
+        st.error(f"Error resizing video: {str(e)}")
+        logger.error(f"Error resizing video: {str(e)}")
+        return None
+
 def generate_multiple_images(api_key: str, prompt: str, num_images: int) -> list:
     """
     Generate multiple images from a text prompt concurrently using ThreadPoolExecutor.
@@ -479,7 +491,7 @@ def main():
 
                                     if final_video:
                                         # Resize final video to default resolution (e.g., 1080p)
-                                        final_video = final_video.resize(newsize=(1920, 1080))
+                                        final_video = resize_video(final_video, newsize=(1920, 1080))
 
                                         # Add audio if uploaded
                                         if st.session_state.audio_file:
@@ -547,7 +559,7 @@ def main():
 
                             if final_video:
                                 # Resize final video to default resolution (e.g., 1080p)
-                                final_video = final_video.resize(newsize=(1920, 1080))
+                                final_video = resize_video(final_video, newsize=(1920, 1080))
 
                                 # Add audio if uploaded
                                 if st.session_state.audio_file:
