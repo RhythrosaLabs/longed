@@ -1,569 +1,399 @@
-import streamlit as st
-import requests
-import base64
-from PIL import Image
-import io
-from moviepy.editor import ImageClip, VideoFileClip, concatenate_videoclips, CompositeVideoClip, vfx
 import os
 import sys
-import numpy as np
 import time
-import traceback
-import zipfile
+import threading
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from moviepy.editor import (
+    ImageClip, 
+    concatenate_videoclips, 
+    AudioFileClip, 
+    CompositeVideoClip, 
+    TextClip, 
+    CompositeAudioClip
+)
+from moviepy.video.fx.all import fadein, fadeout
+from PIL import Image
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
-# Redirect stderr to stdout to avoid issues with logging in some environments
-sys.stderr = sys.stdout
+# Configuration Defaults
+DEFAULT_SNAPSHOT_DIR = 'snapshots'
+DEFAULT_OUTPUT_DIR = 'output'
+DEFAULT_ASSETS_DIR = 'assets'
+DEFAULT_FRAME_RATE = 24
+DEFAULT_TRANSITION_DURATION = 1  # seconds
+DEFAULT_VIDEO_DURATION = 2  # seconds per image
+DEFAULT_VIDEO_CODEC = 'libx264'
+DEFAULT_VIDEO_FORMAT = 'mp4'
+DEFAULT_OUTPUT_VIDEO = os.path.join(DEFAULT_OUTPUT_DIR, 'output_video.mp4')
+DEFAULT_AUDIO_FILE = os.path.join(DEFAULT_ASSETS_DIR, 'background_music.mp3')
+DEFAULT_FONT = os.path.join(DEFAULT_ASSETS_DIR, 'custom_font.ttf')  # Ensure this exists or use default
 
-# Initialize session state for persistent storage
-if 'generated_images' not in st.session_state:
-    st.session_state.generated_images = []
-if 'generated_videos' not in st.session_state:
-    st.session_state.generated_videos = []
-if 'final_video' not in st.session_state:
-    st.session_state.final_video = None
+# Supported Image Formats
+IMAGE_FORMATS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
 
-def resize_image(image):
-    width, height = image.size
-    if (width, height) in [(1024, 576), (576, 1024), (768, 768)]:
-        return image
-    else:
-        st.warning("Resizing image to 768x768 (default)")
-        return image.resize((768, 768))
+# Create necessary directories if they don't exist
+for directory in [DEFAULT_SNAPSHOT_DIR, DEFAULT_OUTPUT_DIR, DEFAULT_ASSETS_DIR]:
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
-def generate_image_from_text(api_key, prompt):
-    url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    data = {
-        "text_prompts": [{"text": prompt}],
-        "cfg_scale": 7,
-        "height": 768,
-        "width": 768,
-        "samples": 1,
-        "steps": 30,
-    }
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        image_data = response.json()['artifacts'][0]['base64']
-        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
-        return image
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error generating image: {str(e)}")
-        return None
+class VideoGeneratorHandler(FileSystemEventHandler):
+    """Handles new image files and updates the video."""
 
-def start_video_generation(api_key, image, cfg_scale=1.8, motion_bucket_id=127, seed=0):
-    url = "https://api.stability.ai/v2beta/image-to-video"
-    headers = {
-        "Authorization": f"Bearer {api_key}"
-    }
-    img_byte_arr = io.BytesIO()
-    image.save(img_byte_arr, format='PNG')
-    img_byte_arr = img_byte_arr.getvalue()
-    files = {
-        "image": ("image.png", img_byte_arr, "image/png")
-    }
-    data = {
-        "seed": str(seed),
-        "cfg_scale": str(cfg_scale),
-        "motion_bucket_id": str(motion_bucket_id)
-    }
-    try:
-        response = requests.post(url, headers=headers, files=files, data=data)
-        response.raise_for_status()
-        return response.json().get('id')
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error starting video generation: {str(e)}")
-        return None
+    def __init__(self, generator):
+        super().__init__()
+        self.generator = generator
 
-def poll_for_video(api_key, generation_id):
-    url = f"https://api.stability.ai/v2beta/image-to-video/result/{generation_id}"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "video/*"
-    }
-    max_attempts = 60
-    for attempt in range(max_attempts):
-        try:
-            response = requests.get(url, headers=headers)
-            if response.status_code == 202:
-                st.write(f"Video generation in progress... Polling attempt {attempt + 1}/{max_attempts}")
-                time.sleep(10)
-            elif response.status_code == 200:
-                return response.content
-            else:
-                response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            st.error(f"Error polling for video: {str(e)}")
-            return None
-    st.error("Video generation timed out. Please try again.")
-    return None
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.lower().endswith(IMAGE_FORMATS):
+            print(f"New image detected: {event.src_path}")
+            self.generator.update_video()
 
-def validate_video_clip(video_path):
-    if not os.path.exists(video_path):
-        st.error(f"Video file not found: {video_path}")
-        return False
-    try:
-        clip = VideoFileClip(video_path)
-        if clip is None:
-            st.error(f"Failed to load video clip: {video_path}")
-            return False
-        duration = clip.duration
-        clip.close()
-        st.write(f"Validated video clip: {video_path}, Duration: {duration} seconds")
-        return duration > 0
-    except Exception as e:
-        st.error(f"Invalid video segment: {video_path}, Error: {str(e)}")
-        return False
+    def on_modified(self, event):
+        if not event.is_directory and event.src_path.lower().endswith(IMAGE_FORMATS):
+            print(f"Image modified: {event.src_path}")
+            self.generator.update_video()
 
-def get_last_frame_image(video_path):
-    if not os.path.exists(video_path):
-        st.error(f"Video file not found: {video_path}")
-        return None
-    try:
-        video_clip = VideoFileClip(video_path)
-        if video_clip is None:
-            st.error(f"Failed to load video clip: {video_path}")
-            return None
-        if video_clip.duration <= 0:
-            st.error(f"Invalid video duration for {video_path}")
-            video_clip.close()
-            return None
-        last_frame = video_clip.get_frame(video_clip.duration - 0.001)
-        last_frame_image = Image.fromarray(np.uint8(last_frame)).convert('RGB')
-        video_clip.close()
-        return last_frame_image
-    except Exception as e:
-        st.error(f"Error extracting last frame from {video_path}: {str(e)}")
-        return None
+class VideoGenerator:
+    """Main class to handle video generation and watching directory."""
 
-def concatenate_videos(video_clips, crossfade_duration=0):
-    valid_clips = []
-    for clip_path in video_clips:
-        st.write(f"Attempting to load clip: {clip_path}")
-        if validate_video_clip(clip_path):
+    def __init__(self, snapshot_dir, output_dir, assets_dir, output_video, frame_rate,
+                 transition_duration, video_duration, video_codec, video_format,
+                 audio_file, font_path, enable_transitions, enable_audio, enable_text,
+                 text_content, text_position, text_fontsize, text_color):
+        self.snapshot_dir = snapshot_dir
+        self.output_dir = output_dir
+        self.assets_dir = assets_dir
+        self.output_video = output_video
+        self.frame_rate = frame_rate
+        self.transition_duration = transition_duration
+        self.video_duration = video_duration
+        self.video_codec = video_codec
+        self.video_format = video_format
+        self.audio_file = audio_file
+        self.font_path = font_path
+        self.enable_transitions = enable_transitions
+        self.enable_audio = enable_audio
+        self.enable_text = enable_text
+        self.text_content = text_content
+        self.text_position = text_position
+        self.text_fontsize = text_fontsize
+        self.text_color = text_color
+
+        self.observer = None
+
+    def get_sorted_image_paths(self):
+        """Retrieve and sort image paths from the snapshot directory."""
+        images = [img for img in os.listdir(self.snapshot_dir) if img.lower().endswith(IMAGE_FORMATS)]
+        images.sort()  # Sort images by name; modify if necessary
+        image_paths = [os.path.join(self.snapshot_dir, img) for img in images]
+        return image_paths
+
+    def create_video(self, image_paths):
+        """Create a video from image paths with optional transitions and text overlays."""
+        if not image_paths:
+            print("No images found to create a video.")
+            return
+
+        clips = []
+        for img_path in image_paths:
             try:
-                clip = VideoFileClip(clip_path)
-                if clip is not None and clip.duration > 0:
-                    valid_clips.append(clip)
-                    st.write(f"Successfully loaded clip: {clip_path}, Duration: {clip.duration} seconds")
-                else:
-                    st.warning(f"Skipping invalid clip: {clip_path}")
+                img = Image.open(img_path)
+                width, height = img.size
+                img.close()
+                # Create ImageClip
+                clip = ImageClip(img_path).set_duration(self.video_duration)
+                # Add text overlay if enabled
+                if self.enable_text and self.text_content:
+                    txt_clip = TextClip(
+                        self.text_content,
+                        fontsize=self.text_fontsize,
+                        color=self.text_color,
+                        font=self.font_path if self.font_path else 'Arial'
+                    ).set_position(self.text_position).set_duration(self.video_duration)
+                    clip = CompositeVideoClip([clip, txt_clip])
+                # Add fade in and fade out transitions
+                if self.enable_transitions:
+                    clip = clip.fx(fadein, self.transition_duration).fx(fadeout, self.transition_duration)
+                clips.append(clip)
             except Exception as e:
-                st.warning(f"Error loading clip {clip_path}: {str(e)}")
-        else:
-            st.warning(f"Validation failed for clip: {clip_path}")
+                print(f"Error processing image {img_path}: {e}")
+                continue
 
-    if not valid_clips:
-        st.error("No valid video segments found. Unable to concatenate.")
-        return None, None
-
-    try:
-        st.write(f"Attempting to concatenate {len(valid_clips)} valid clips")
+        # Concatenate clips
+        final_clip = concatenate_videoclips(clips, method="compose")
         
-        # Trim the last frame from all clips except the last one
-        trimmed_clips = []
-        for i, clip in enumerate(valid_clips):
-            if i < len(valid_clips) - 1:
-                # Subtract a small duration (e.g., 1/30 second) to remove approximately one frame
-                trimmed_clip = clip.subclip(0, clip.duration - 1/30)
-                trimmed_clips.append(trimmed_clip)
-            else:
-                trimmed_clips.append(clip)
-        
-        if crossfade_duration > 0:
-            st.write(f"Applying crossfade of {crossfade_duration} seconds")
-            # Apply crossfade transition
-            final_clips = []
-            for i, clip in enumerate(trimmed_clips):
-                if i == 0:
-                    final_clips.append(clip)
-                else:
-                    # Create a crossfade transition
-                    fade_out = trimmed_clips[i-1].fx(vfx.fadeout, duration=crossfade_duration)
-                    fade_in = clip.fx(vfx.fadein, duration=crossfade_duration)
-                    transition = CompositeVideoClip([fade_out, fade_in])
-                    transition = transition.set_duration(crossfade_duration)
-                    
-                    # Add the transition and the full clip
-                    final_clips.append(transition)
-                    final_clips.append(clip)
-            
-            final_video = concatenate_videoclips(final_clips)
-        else:
-            final_video = concatenate_videoclips(trimmed_clips)
-        
-        st.write(f"Concatenation successful. Final video duration: {final_video.duration} seconds")
-        return final_video, valid_clips
-    except Exception as e:
-        st.error(f"Error concatenating videos: {str(e)}")
-        for clip in valid_clips:
-            clip.close()
-        return None, None
+        # Add background audio if enabled
+        if self.enable_audio and os.path.exists(self.audio_file):
+            try:
+                audio_clip = AudioFileClip(self.audio_file).subclip(0, final_clip.duration)
+                final_audio = CompositeAudioClip([audio_clip])
+                final_clip = final_clip.set_audio(final_audio)
+            except Exception as e:
+                print(f"Error adding audio: {e}")
 
-def generate_multiple_images(api_key, prompt, num_images):
-    images = []
-    for i in range(num_images):
-        st.write(f"Generating image {i+1}/{num_images}...")
-        image = generate_image_from_text(api_key, prompt)
-        if image:
-            images.append(image)
-        else:
-            st.error(f"Failed to generate image {i+1}")
-    return images
+        # Write the video file
+        try:
+            final_clip.write_videofile(
+                self.output_video,
+                fps=self.frame_rate,
+                codec=self.video_codec,
+                audio_codec='aac' if self.enable_audio else None,
+                temp_audiofile='temp-audio.m4a',
+                remove_temp=True
+            )
+            print(f"Video successfully saved at {self.output_video}")
+        except Exception as e:
+            print(f"Error writing video file: {e}")
+        finally:
+            final_clip.close()
 
-def create_video_from_images(images, fps, output_path):
-    clips = [ImageClip(np.array(img)).set_duration(1/fps) for img in images]
-    video = concatenate_videoclips(clips, method="compose")
-    video.write_videofile(output_path, fps=fps, codec="libx264")
-    return output_path
+    def update_video(self):
+        """Fetch images and create/update the video."""
+        image_paths = self.get_sorted_image_paths()
+        self.create_video(image_paths)
 
-def display_images_in_grid(images, columns=3):
-    """Display images in a grid layout with captions."""
-    for i in range(0, len(images), columns):
-        cols = st.columns(columns)
-        for j in range(columns):
-            if i + j < len(images):
-                with cols[j]:
-                    st.image(images[i + j], use_column_width=True, caption=f"Image {i + j + 1}")
-                    st.markdown(f"<p style='text-align: center;'>Image {i + j + 1}</p>", unsafe_allow_html=True)
+    def start_watching(self):
+        """Start watching the snapshot directory for changes."""
+        event_handler = VideoGeneratorHandler(self)
+        self.observer = Observer()
+        self.observer.schedule(event_handler, path=self.snapshot_dir, recursive=False)
+        self.observer.start()
+        print(f"Started watching directory: {self.snapshot_dir}")
 
-def create_zip_file(images, videos, output_path="generated_content.zip"):
-    if not images and not videos:
-        st.error("No images or videos to create a zip file.")
-        return None
+    def stop_watching(self):
+        """Stop watching the snapshot directory."""
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
+            print(f"Stopped watching directory: {self.snapshot_dir}")
 
-    try:
-        with zipfile.ZipFile(output_path, 'w') as zipf:
-            for i, img in enumerate(images):
-                img_path = f"image_{i+1}.png"
-                img.save(img_path)
-                zipf.write(img_path)
-                os.remove(img_path)
-            
-            for video in videos:
-                if os.path.exists(video):
-                    zipf.write(video)
-                else:
-                    st.warning(f"Video file not found: {video}")
-        
-        return output_path
-    except Exception as e:
-        st.error(f"Error creating zip file: {str(e)}")
-        return None
+class VideoGeneratorGUI:
+    """GUI for the Video Generator application."""
 
+    def __init__(self, root):
+        self.root = root
+        self.root.title("🔥 Super Bad Ass Video Generator and Editor 🔥")
+        self.root.geometry("800x600")
+        self.video_generator = None
+        self.observer_thread = None
 
-def snapshot_mode_v2(api_key, prompt, num_segments, cfg_scale, motion_bucket_id, seed):
-    st.write("Generating initial image for Snapshot Mode v2...")
-    initial_image = generate_image_from_text(api_key, prompt)
-    if initial_image is None:
-        return None, None
+        # Initialize variables with defaults
+        self.snapshot_dir = tk.StringVar(value=DEFAULT_SNAPSHOT_DIR)
+        self.output_dir = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
+        self.assets_dir = tk.StringVar(value=DEFAULT_ASSETS_DIR)
+        self.output_video = tk.StringVar(value=DEFAULT_OUTPUT_VIDEO)
+        self.frame_rate = tk.IntVar(value=DEFAULT_FRAME_RATE)
+        self.transition_duration = tk.DoubleVar(value=DEFAULT_TRANSITION_DURATION)
+        self.video_duration = tk.DoubleVar(value=DEFAULT_VIDEO_DURATION)
+        self.video_codec = tk.StringVar(value=DEFAULT_VIDEO_CODEC)
+        self.video_format = tk.StringVar(value=DEFAULT_VIDEO_FORMAT)
+        self.audio_file = tk.StringVar(value=DEFAULT_AUDIO_FILE)
+        self.font_path = tk.StringVar(value=DEFAULT_FONT)
+        self.enable_transitions = tk.BooleanVar(value=True)
+        self.enable_audio = tk.BooleanVar(value=True)
+        self.enable_text = tk.BooleanVar(value=False)
+        self.text_content = tk.StringVar(value="Sample Text")
+        self.text_position = tk.StringVar(value="bottom")
+        self.text_fontsize = tk.IntVar(value=24)
+        self.text_color = tk.StringVar(value="white")
 
-    st.session_state.generated_images.append(initial_image)
-    
-    video_clips = []
-    current_image = initial_image
+        self.create_widgets()
 
-    for i in range(num_segments):
-        st.write(f"Generating video segment {i+1}/{num_segments}...")
-        generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
+    def create_widgets(self):
+        """Create and place GUI widgets."""
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(expand=True, fill='both')
 
-        if generation_id:
-            video_content = poll_for_video(api_key, generation_id)
+        # Settings Tab
+        settings_frame = ttk.Frame(notebook)
+        notebook.add(settings_frame, text='Settings')
 
-            if video_content:
-                video_path = f"video_segment_{i+1}.mp4"
-                with open(video_path, "wb") as f:
-                    f.write(video_content)
-                st.write(f"Saved video segment to {video_path}")
-                video_clips.append(video_path)
-                st.session_state.generated_videos.append(video_path)
+        # Snapshot Directory
+        ttk.Label(settings_frame, text="📸 Snapshots Directory:").grid(row=0, column=0, sticky='e', padx=5, pady=5)
+        ttk.Entry(settings_frame, textvariable=self.snapshot_dir, width=50).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(settings_frame, text="Browse", command=self.browse_snapshot_dir).grid(row=0, column=2, padx=5, pady=5)
 
-                last_frame_image = get_last_frame_image(video_path)
-                if last_frame_image:
-                    current_image = last_frame_image
-                    st.session_state.generated_images.append(current_image)
-                else:
-                    st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
-            else:
-                st.error(f"Failed to retrieve video content for segment {i+1}.")
-        else:
-            st.error(f"Failed to start video generation for segment {i+1}.")
+        # Output Directory
+        ttk.Label(settings_frame, text="📂 Output Directory:").grid(row=1, column=0, sticky='e', padx=5, pady=5)
+        ttk.Entry(settings_frame, textvariable=self.output_dir, width=50).grid(row=1, column=1, padx=5, pady=5)
+        ttk.Button(settings_frame, text="Browse", command=self.browse_output_dir).grid(row=1, column=2, padx=5, pady=5)
 
-    return video_clips, initial_image
+        # Assets Directory
+        ttk.Label(settings_frame, text="🎨 Assets Directory:").grid(row=2, column=0, sticky='e', padx=5, pady=5)
+        ttk.Entry(settings_frame, textvariable=self.assets_dir, width=50).grid(row=2, column=1, padx=5, pady=5)
+        ttk.Button(settings_frame, text="Browse", command=self.browse_assets_dir).grid(row=2, column=2, padx=5, pady=5)
+
+        # Output Video File
+        ttk.Label(settings_frame, text="🎥 Output Video File:").grid(row=3, column=0, sticky='e', padx=5, pady=5)
+        ttk.Entry(settings_frame, textvariable=self.output_video, width=50).grid(row=3, column=1, padx=5, pady=5)
+        ttk.Button(settings_frame, text="Browse", command=self.browse_output_video).grid(row=3, column=2, padx=5, pady=5)
+
+        # Frame Rate
+        ttk.Label(settings_frame, text="⏱️ Frame Rate (fps):").grid(row=4, column=0, sticky='e', padx=5, pady=5)
+        ttk.Spinbox(settings_frame, from_=1, to=60, textvariable=self.frame_rate, width=5).grid(row=4, column=1, sticky='w', padx=5, pady=5)
+
+        # Transition Duration
+        ttk.Label(settings_frame, text="🔄 Transition Duration (s):").grid(row=5, column=0, sticky='e', padx=5, pady=5)
+        ttk.Spinbox(settings_frame, from_=0.1, to=5.0, increment=0.1, textvariable=self.transition_duration, width=5).grid(row=5, column=1, sticky='w', padx=5, pady=5)
+
+        # Video Duration per Image
+        ttk.Label(settings_frame, text="⏳ Duration per Image (s):").grid(row=6, column=0, sticky='e', padx=5, pady=5)
+        ttk.Spinbox(settings_frame, from_=1, to=10, increment=0.5, textvariable=self.video_duration, width=5).grid(row=6, column=1, sticky='w', padx=5, pady=5)
+
+        # Video Codec
+        ttk.Label(settings_frame, text="🖥️ Video Codec:").grid(row=7, column=0, sticky='e', padx=5, pady=5)
+        ttk.Combobox(settings_frame, textvariable=self.video_codec, values=['libx264', 'mpeg4', 'libvpx'], width=10).grid(row=7, column=1, sticky='w', padx=5, pady=5)
+
+        # Video Format
+        ttk.Label(settings_frame, text="📄 Video Format:").grid(row=8, column=0, sticky='e', padx=5, pady=5)
+        ttk.Combobox(settings_frame, textvariable=self.video_format, values=['mp4', 'avi', 'webm'], width=10).grid(row=8, column=1, sticky='w', padx=5, pady=5)
+
+        # Background Audio File
+        ttk.Label(settings_frame, text="🎵 Background Audio File:").grid(row=9, column=0, sticky='e', padx=5, pady=5)
+        ttk.Entry(settings_frame, textvariable=self.audio_file, width=50).grid(row=9, column=1, padx=5, pady=5)
+        ttk.Button(settings_frame, text="Browse", command=self.browse_audio_file).grid(row=9, column=2, padx=5, pady=5)
+
+        # Font File
+        ttk.Label(settings_frame, text="🅰️ Font File (optional):").grid(row=10, column=0, sticky='e', padx=5, pady=5)
+        ttk.Entry(settings_frame, textvariable=self.font_path, width=50).grid(row=10, column=1, padx=5, pady=5)
+        ttk.Button(settings_frame, text="Browse", command=self.browse_font_file).grid(row=10, column=2, padx=5, pady=5)
+
+        # Enable Transitions
+        ttk.Checkbutton(settings_frame, text="🔁 Enable Transitions", variable=self.enable_transitions).grid(row=11, column=1, sticky='w', padx=5, pady=5)
+
+        # Enable Audio
+        ttk.Checkbutton(settings_frame, text="🔊 Enable Background Audio", variable=self.enable_audio).grid(row=12, column=1, sticky='w', padx=5, pady=5)
+
+        # Enable Text Overlay
+        ttk.Checkbutton(settings_frame, text="✏️ Enable Text Overlay", variable=self.enable_text, command=self.toggle_text_options).grid(row=13, column=1, sticky='w', padx=5, pady=5)
+
+        # Text Content
+        self.text_content_entry = ttk.Entry(settings_frame, textvariable=self.text_content, width=50)
+        self.text_content_entry.grid(row=14, column=1, padx=5, pady=5)
+        ttk.Label(settings_frame, text="📝 Text Content:").grid(row=14, column=0, sticky='e', padx=5, pady=5)
+
+        # Text Position
+        ttk.Label(settings_frame, text="📍 Text Position:").grid(row=15, column=0, sticky='e', padx=5, pady=5)
+        ttk.Combobox(settings_frame, textvariable=self.text_position, values=['top', 'center', 'bottom', 'left', 'right'], width=10).grid(row=15, column=1, sticky='w', padx=5, pady=5)
+
+        # Text Font Size
+        ttk.Label(settings_frame, text="🔤 Text Font Size:").grid(row=16, column=0, sticky='e', padx=5, pady=5)
+        ttk.Spinbox(settings_frame, from_=10, to=100, textvariable=self.text_fontsize, width=5).grid(row=16, column=1, sticky='w', padx=5, pady=5)
+
+        # Text Color
+        ttk.Label(settings_frame, text="🎨 Text Color:").grid(row=17, column=0, sticky='e', padx=5, pady=5)
+        ttk.Entry(settings_frame, textvariable=self.text_color, width=10).grid(row=17, column=1, sticky='w', padx=5, pady=5)
+
+        # Start and Stop Buttons
+        ttk.Button(settings_frame, text="🚀 Start Generating Video", command=self.start_video_generation).grid(row=18, column=1, sticky='e', padx=5, pady=20)
+        ttk.Button(settings_frame, text="🛑 Stop", command=self.stop_video_generation).grid(row=18, column=2, sticky='w', padx=5, pady=20)
+
+        # Disable text options initially
+        self.toggle_text_options()
+
+    def toggle_text_options(self):
+        """Enable or disable text overlay options based on the checkbox."""
+        state = 'normal' if self.enable_text.get() else 'disabled'
+        self.text_content_entry.configure(state=state)
+
+    def browse_snapshot_dir(self):
+        """Browse and select the snapshots directory."""
+        directory = filedialog.askdirectory()
+        if directory:
+            self.snapshot_dir.set(directory)
+
+    def browse_output_dir(self):
+        """Browse and select the output directory."""
+        directory = filedialog.askdirectory()
+        if directory:
+            self.output_dir.set(directory)
+
+    def browse_assets_dir(self):
+        """Browse and select the assets directory."""
+        directory = filedialog.askdirectory()
+        if directory:
+            self.assets_dir.set(directory)
+
+    def browse_output_video(self):
+        """Browse and select the output video file."""
+        filetypes = [('MP4', '*.mp4'), ('AVI', '*.avi'), ('WebM', '*.webm')]
+        file = filedialog.asksaveasfilename(defaultextension='.mp4', filetypes=filetypes)
+        if file:
+            self.output_video.set(file)
+
+    def browse_audio_file(self):
+        """Browse and select the background audio file."""
+        filetypes = [('Audio Files', '*.mp3 *.wav *.aac *.m4a')]
+        file = filedialog.askopenfilename(filetypes=filetypes)
+        if file:
+            self.audio_file.set(file)
+
+    def browse_font_file(self):
+        """Browse and select the font file."""
+        filetypes = [('Font Files', '*.ttf *.otf')]
+        file = filedialog.askopenfilename(filetypes=filetypes)
+        if file:
+            self.font_path.set(file)
+
+    def start_video_generation(self):
+        """Initialize the VideoGenerator and start watching the snapshot directory."""
+        # Validate directories
+        if not os.path.exists(self.snapshot_dir.get()):
+            messagebox.showerror("Error", f"Snapshot directory does not exist: {self.snapshot_dir.get()}")
+            return
+        if not os.path.exists(self.output_dir.get()):
+            os.makedirs(self.output_dir.get())
+        if not os.path.exists(self.assets_dir.get()):
+            os.makedirs(self.assets_dir.get())
+
+        # Update output video path based on format
+        output_video = self.output_video.get()
+        if not output_video.endswith(self.video_format.get()):
+            output_video += f".{self.video_format.get()}"
+
+        # Initialize VideoGenerator
+        self.video_generator = VideoGenerator(
+            snapshot_dir=self.snapshot_dir.get(),
+            output_dir=self.output_dir.get(),
+            assets_dir=self.assets_dir.get(),
+            output_video=output_video,
+            frame_rate=self.frame_rate.get(),
+            transition_duration=self.transition_duration.get(),
+            video_duration=self.video_duration.get(),
+            video_codec=self.video_codec.get(),
+            video_format=self.video_format.get(),
+            audio_file=self.audio_file.get(),
+            font_path=self.font_path.get(),
+            enable_transitions=self.enable_transitions.get(),
+            enable_audio=self.enable_audio.get(),
+            enable_text=self.enable_text.get(),
+            text_content=self.text_content.get(),
+            text_position=self.text_position.get(),
+            text_fontsize=self.text_fontsize.get(),
+            text_color=self.text_color.get()
+        )
+
+        # Initial Video Creation
+        self.video_generator.update_video()
+
+        # Start watching in a separate thread to keep GUI responsive
+        self.observer_thread = threading.Thread(target=self.video_generator.start_watching, daemon=True)
+        self.observer_thread.start()
+
+        messagebox.showinfo("Started", "🚀 Video generation started and directory is being watched.")
+
+    def stop_video_generation(self):
+        """Stop watching the snapshot directory."""
+        if self.video_generator:
+            self.video_generator.stop_watching()
+            messagebox.showinfo("Stopped", "🛑 Video generation stopped.")
 
 def main():
-    st.set_page_config(page_title="Stable Diffusion Longform Video Creator", layout="wide")
-
-    # Sidebar
-    st.sidebar.title("About")
-    st.sidebar.info(
-        "This app uses Stability AI's API to create longform videos from text prompts or images. "
-        "It offers three modes: Text-to-Video, Image-to-Video, and Snapshot Mode."
-    )
-    
-    st.sidebar.title("How to Use")
-    st.sidebar.markdown(
-        """
-        1. Enter your Stability AI API Key
-        2. Go to the Generator tab
-        3. Choose a mode: Text-to-Video, Image-to-Video, or Snapshot Mode
-        4. Enter required inputs and adjust settings
-        5. Click 'Generate Content'
-        6. Wait for the process to complete
-        7. View results in the Images and Videos tabs
-        """
-    )
-    
-    st.sidebar.title("API Key")
-    api_key = st.sidebar.text_input("Enter your Stability AI API Key", type="password")
-
-    # Main content
-    st.title("Stable Diffusion Longform Video Creator")
-
-    tab1, tab2, tab3 = st.tabs(["Generator", "Images", "Videos"])
-
-    with tab1:
-        mode = st.radio("Select Mode", ("Text-to-Video", "Image-to-Video", "Snapshot Mode"))
-        
-        if mode in ["Text-to-Video", "Snapshot Mode"]:
-            prompt = st.text_area("Enter a text prompt for video generation", height=100)
-        elif mode == "Image-to-Video":
-            image_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
-
-        with st.expander("Settings", expanded=False):
-            if mode == "Snapshot Mode":
-                num_images = st.slider("Number of images to generate", 10, 300, 60)
-                fps = st.slider("Frames per second", 1, 60, 24)
-                use_video = st.checkbox("Generate video from images", value=False)
-                if use_video:
-                    num_segments = st.slider("Number of video segments", 1, 10, 5)
-                    cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
-                    motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
-                    seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
-                    crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
-            else:
-                cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8)
-                motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
-                seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
-                num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
-                crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.01)
-
-        if st.button("Generate Content"):
-            if not api_key:
-                st.error("Please enter the API key in the sidebar.")
-                return
-
-            if mode in ["Text-to-Video", "Snapshot Mode"] and not prompt:
-                st.error("Please enter a text prompt.")
-                return
-
-            if mode == "Image-to-Video" and not image_file:
-                st.error("Please upload an image.")
-                return
-
-            # Clear previous results
-            st.session_state.generated_images = []
-            st.session_state.generated_videos = []
-            st.session_state.final_video = None
-
-            try:
-                if mode == "Snapshot Mode":
-                    st.write("Generating images for Snapshot Mode...")
-                    images = generate_multiple_images(api_key, prompt, num_images)
-                    st.session_state.generated_images = images
-                    
-                    if images:
-                        if use_video:
-                            st.write("Creating video from generated images...")
-                            video_clips = []
-                            for i, image in enumerate(images):
-                                st.write(f"Generating video segment {i+1}/{num_segments}...")
-                                generation_id = start_video_generation(api_key, image, cfg_scale, motion_bucket_id, seed)
-                                if generation_id:
-                                    video_content = poll_for_video(api_key, generation_id)
-                                    if video_content:
-                                        video_path = f"video_segment_{i+1}.mp4"
-                                        with open(video_path, "wb") as f:
-                                            f.write(video_content)
-                                        st.write(f"Saved video segment to {video_path}")
-                                        video_clips.append(video_path)
-                                        st.session_state.generated_videos.append(video_path)
-                                    else:
-                                        st.error(f"Failed to retrieve video content for segment {i+1}.")
-                                else:
-                                    st.error(f"Failed to start video generation for segment {i+1}.")
-                                
-                                if len(video_clips) >= num_segments:
-                                    break
-
-                            if video_clips:
-                                st.write("Concatenating video segments into one longform video...")
-                                final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
-                                if final_video:
-                                    try:
-                                        final_video_path = "snapshot_longform_video.mp4"
-                                        final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
-                                        st.session_state.final_video = final_video_path
-                                        st.success(f"Snapshot Mode video created: {final_video_path}")
-                                    except Exception as e:
-                                        st.error(f"Error writing final video: {str(e)}")
-                                        st.write("Traceback:", traceback.format_exc())
-                                    finally:
-                                        if final_video:
-                                            final_video.close()
-                                        if valid_clips:
-                                            for clip in valid_clips:
-                                                clip.close()
-                                else:
-                                    st.error("Failed to create the final video.")
-                                
-                                # Clean up individual video segments
-                                for video_file in video_clips:
-                                    if os.path.exists(video_file):
-                                        os.remove(video_file)
-                                        st.write(f"Removed temporary file: {video_file}")
-                                    else:
-                                        st.warning(f"Could not find file to remove: {video_file}")
-                            else:
-                                st.error("No video segments were successfully generated.")
-                        else:
-                            st.success(f"Generated {len(images)} images for Snapshot Mode.")
-                    else:
-                        st.error("Failed to generate images for Snapshot Mode.")
-
-                elif mode == "Text-to-Video":
-                    st.write("Generating image from text prompt...")
-                    image = generate_image_from_text(api_key, prompt)
-                    if image is None:
-                        return
-                    image = resize_image(image)
-                    st.session_state.generated_images.append(image)
-                    
-                    video_clips = []
-                    current_image = image
-
-                    for i in range(num_segments):
-                        st.write(f"Generating video segment {i+1}/{num_segments}...")
-                        generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
-
-                        if generation_id:
-                            video_content = poll_for_video(api_key, generation_id)
-
-                            if video_content:
-                                video_path = f"video_segment_{i+1}.mp4"
-                                with open(video_path, "wb") as f:
-                                    f.write(video_content)
-                                st.write(f"Saved video segment to {video_path}")
-                                video_clips.append(video_path)
-                                st.session_state.generated_videos.append(video_path)
-
-                                last_frame_image = get_last_frame_image(video_path)
-                                if last_frame_image:
-                                    current_image = last_frame_image
-                                    st.session_state.generated_images.append(current_image)
-                                else:
-                                    st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
-                            else:
-                                st.error(f"Failed to retrieve video content for segment {i+1}.")
-                        else:
-                            st.error(f"Failed to start video generation for segment {i+1}.")
-
-                    if video_clips:
-                        st.write("Concatenating video segments into one longform video...")
-                        final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
-                        if final_video:
-                            try:
-                                final_video_path = "longform_video.mp4"
-                                final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
-                                st.session_state.final_video = final_video_path
-                                st.success(f"Longform video created: {final_video_path}")
-                            except Exception as e:
-                                st.error(f"Error writing final video: {str(e)}")
-                                st.write("Traceback:", traceback.format_exc())
-                            finally:
-                                if final_video:
-                                    final_video.close()
-                                if valid_clips:
-                                    for clip in valid_clips:
-                                        clip.close()
-                        else:
-                            st.error("Failed to create the final video.")
-                        
-                        # Clean up individual video segments
-                        for video_file in video_clips:
-                            if os.path.exists(video_file):
-                                os.remove(video_file)
-                                st.write(f"Removed temporary file: {video_file}")
-                            else:
-                                st.warning(f"Could not find file to remove: {video_file}")
-                    else:
-                        st.error("No video segments were successfully generated.")
-
-                elif mode == "Image-to-Video":
-                    image = Image.open(image_file)
-                    image = resize_image(image)
-                    st.session_state.generated_images.append(image)
-
-                    st.write("Generating video from uploaded image...")
-                    generation_id = start_video_generation(api_key, image, cfg_scale, motion_bucket_id, seed)
-
-                    if generation_id:
-                        video_content = poll_for_video(api_key, generation_id)
-
-                        if video_content:
-                            video_path = "image_to_video.mp4"
-                            with open(video_path, "wb") as f:
-                                f.write(video_content)
-                            st.write(f"Saved video to {video_path}")
-                            st.session_state.generated_videos.append(video_path)
-                            st.session_state.final_video = video_path
-                            st.success(f"Image-to-Video created: {video_path}")
-                        else:
-                            st.error("Failed to retrieve video content.")
-                    else:
-                        st.error("Failed to start video generation.")
-
-            except Exception as e:
-                st.error(f"An unexpected error occurred: {str(e)}")
-                st.write("Error details:", str(e))
-                st.write("Traceback:", traceback.format_exc())
-
-    with tab2:
-        st.subheader("Generated Images")
-        if st.session_state.generated_images:
-            display_images_in_grid(st.session_state.generated_images)
-        else:
-            st.write("No images generated yet. Use the Generator tab to create images.")
-
-    with tab3:
-        st.subheader("Generated Videos")
-        if st.session_state.generated_videos:
-            for i, video_path in enumerate(st.session_state.generated_videos):
-                if os.path.exists(video_path):
-                    st.video(video_path)
-                    st.write(f"Video Segment {i+1}")
-                    with open(video_path, "rb") as f:
-                        st.download_button(f"Download Video Segment {i+1}", f, file_name=f"video_segment_{i+1}.mp4")
-                else:
-                    st.error(f"Video file not found: {video_path}")
-            
-            if st.session_state.final_video and os.path.exists(st.session_state.final_video):
-                st.subheader("Final Longform Video")
-                st.video(st.session_state.final_video)
-                with open(st.session_state.final_video, "rb") as f:
-                    st.download_button("Download Longform Video", f, file_name="longform_video.mp4")
-        else:
-            st.write("No videos generated yet. Use the Generator tab to create videos.")
-
-    # Add download all button
-    if st.session_state.generated_images or st.session_state.generated_videos:
-        zip_path = create_zip_file(st.session_state.generated_images, st.session_state.generated_videos)
-        with open(zip_path, "rb") as f:
-            st.download_button("Download All Content (ZIP)", f, file_name="generated_content.zip")
-        os.remove(zip_path)
+    root = tk.Tk()
+    app = VideoGeneratorGUI(root)
+    root.mainloop()
 
 if __name__ == "__main__":
     main()
