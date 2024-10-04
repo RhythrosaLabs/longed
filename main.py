@@ -35,6 +35,13 @@ for key in ['generated_images', 'generated_videos', 'final_video', 'audio_file']
         if key == 'audio_file':
             st.session_state[key] = None
 
+# Replace deprecated Image.ANTIALIAS with Image.LANCZOS
+def resize_image(image: Image.Image, new_size: tuple):
+    """
+    Resize the image using the LANCZOS filter (replacement for deprecated ANTIALIAS).
+    """
+    return image.resize(new_size, Image.LANCZOS)
+
 # Caching decorator for resizing images
 @st.cache_data(show_spinner=False)
 def cached_resize_image(_image: Image.Image) -> Image.Image:
@@ -46,7 +53,7 @@ def cached_resize_image(_image: Image.Image) -> Image.Image:
         return _image
     else:
         st.warning("Resizing image to 768x768 (default)")
-        return _image.resize((768, 768))
+        return _image.resize((768, 768), Image.LANCZOS)
 
 # Caching decorator for validating video clips
 @st.cache_resource
@@ -219,6 +226,7 @@ def concatenate_videos(video_clips: list, crossfade_duration: float = 0.0) -> (V
             final_video = concatenate_videoclips(clips_with_transitions, method="compose")
         else:
             final_video = concatenate_videoclips(valid_clips, method="compose")
+
         st.write(f"Concatenation successful. Final video duration: {final_video.duration} seconds")
         return final_video, valid_clips
     except Exception as e:
