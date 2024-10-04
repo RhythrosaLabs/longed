@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import base64
-from PIL import Image
+from PIL import Image, ImageEnhance
 import io
 from moviepy.editor import (
     ImageClip,
@@ -9,6 +9,7 @@ from moviepy.editor import (
     concatenate_videoclips,
     CompositeVideoClip,
     vfx,
+    AudioFileClip,
 )
 import os
 import sys
@@ -18,6 +19,9 @@ import traceback
 import zipfile
 import logging
 from tempfile import TemporaryDirectory
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import aiohttp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,9 +31,28 @@ logger = logging.getLogger(__name__)
 sys.stderr = sys.stdout
 
 # Initialize session state for persistent storage
-for key in ['generated_images', 'generated_videos', 'final_video']:
+for key in ['generated_images', 'generated_videos', 'final_video', 'audio_file']:
     if key not in st.session_state:
         st.session_state[key] = [] if key != 'final_video' else None
+        if key == 'audio_file':
+            st.session_state[key] = None
+
+# Caching decorator for resizing images
+@st.cache_data(show_spinner=False)
+def cached_resize_image(image_bytes: bytes, size: tuple) -> Image.Image:
+    image = Image.open(io.BytesIO(image_bytes))
+    return image.resize(size)
+
+# Caching decorator for validating video clips
+@st.cache_resource
+def cached_validate_video_clip(video_path: str) -> bool:
+    if not os.path.exists(video_path):
+        return False
+    try:
+        with VideoFileClip(video_path) as clip:
+            return clip.duration > 0
+    except:
+        return False
 
 def resize_image(image: Image.Image) -> Image.Image:
     """
@@ -42,9 +65,9 @@ def resize_image(image: Image.Image) -> Image.Image:
         st.warning("Resizing image to 768x768 (default)")
         return image.resize((768, 768))
 
-def generate_image_from_text(api_key: str, prompt: str) -> Image.Image:
+async def generate_image_from_text(session: aiohttp.ClientSession, api_key: str, prompt: str) -> Image.Image:
     """
-    Generate an image from a text prompt using Stability AI's API.
+    Asynchronously generate an image from a text prompt using Stability AI's API.
     """
     url = "https://api.stability.ai/v1beta/generation/stable-diffusion-v1-6/text-to-image"
     headers = {
@@ -60,24 +83,21 @@ def generate_image_from_text(api_key: str, prompt: str) -> Image.Image:
         "steps": 30,
     }
     try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        image_data = response.json()['artifacts'][0]['base64']
-        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
-        return image
-    except requests.exceptions.RequestException as e:
+        async with session.post(url, headers=headers, json=data) as response:
+            response.raise_for_status()
+            resp_json = await response.json()
+            image_data = resp_json['artifacts'][0]['base64']
+            image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+            return image
+    except Exception as e:
         st.error(f"Error generating image: {str(e)}")
         logger.error(f"Error generating image: {str(e)}")
         return None
-    except (KeyError, IndexError) as e:
-        st.error("Unexpected response structure from the image generation API.")
-        logger.error(f"Unexpected response structure: {str(e)}")
-        return None
 
-def start_video_generation(api_key: str, image: Image.Image, cfg_scale: float = 1.8,
-                          motion_bucket_id: int = 127, seed: int = 0) -> str:
+async def start_video_generation(session: aiohttp.ClientSession, api_key: str, image: Image.Image, cfg_scale: float = 1.8,
+                                motion_bucket_id: int = 127, seed: int = 0) -> str:
     """
-    Initiate video generation based on an image using Stability AI's API.
+    Asynchronously initiate video generation based on an image using Stability AI's API.
     Returns the generation ID if successful.
     """
     url = "https://api.stability.ai/v2beta/image-to-video"
@@ -96,23 +116,24 @@ def start_video_generation(api_key: str, image: Image.Image, cfg_scale: float = 
         "motion_bucket_id": str(motion_bucket_id)
     }
     try:
-        response = requests.post(url, headers=headers, files=files, data=data)
-        response.raise_for_status()
-        generation_id = response.json().get('id')
-        if generation_id:
-            return generation_id
-        else:
-            st.error("No generation ID returned from the API.")
-            logger.error("No generation ID returned from the API.")
-            return None
-    except requests.exceptions.RequestException as e:
+        async with session.post(url, headers=headers, data=data, files=files) as response:
+            response.raise_for_status()
+            resp_json = await response.json()
+            generation_id = resp_json.get('id')
+            if generation_id:
+                return generation_id
+            else:
+                st.error("No generation ID returned from the API.")
+                logger.error("No generation ID returned from the API.")
+                return None
+    except Exception as e:
         st.error(f"Error starting video generation: {str(e)}")
         logger.error(f"Error starting video generation: {str(e)}")
         return None
 
-def poll_for_video(api_key: str, generation_id: str, timeout: int = 600, interval: int = 10) -> bytes:
+async def poll_for_video(session: aiohttp.ClientSession, api_key: str, generation_id: str, timeout: int = 600, interval: int = 10) -> bytes:
     """
-    Poll the API for the generated video until it's ready or timeout is reached.
+    Asynchronously poll the API for the generated video until it's ready or timeout is reached.
     Returns the video content in bytes if successful.
     """
     url = f"https://api.stability.ai/v2beta/image-to-video/result/{generation_id}"
@@ -123,46 +144,22 @@ def poll_for_video(api_key: str, generation_id: str, timeout: int = 600, interva
     attempts = timeout // interval
     for attempt in range(1, attempts + 1):
         try:
-            response = requests.get(url, headers=headers)
-            if response.status_code == 202:
-                st.info(f"Video generation in progress... (Attempt {attempt}/{attempts})")
-                time.sleep(interval)
-            elif response.status_code == 200:
-                st.success("Video generation completed.")
-                return response.content
-            else:
-                response.raise_for_status()
-        except requests.exceptions.RequestException as e:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 202:
+                    st.info(f"Video generation in progress... (Attempt {attempt}/{attempts})")
+                    await asyncio.sleep(interval)
+                elif response.status == 200:
+                    st.success("Video generation completed.")
+                    return await response.read()
+                else:
+                    response.raise_for_status()
+        except Exception as e:
             st.error(f"Error polling for video: {str(e)}")
             logger.error(f"Error polling for video: {str(e)}")
             return None
     st.error("Video generation timed out. Please try again.")
     logger.error("Video generation timed out.")
     return None
-
-def validate_video_clip(video_path: str) -> bool:
-    """
-    Validate the video clip to ensure it exists and has a positive duration.
-    """
-    if not os.path.exists(video_path):
-        st.error(f"Video file not found: {video_path}")
-        logger.error(f"Video file not found: {video_path}")
-        return False
-    try:
-        clip = VideoFileClip(video_path)
-        duration = clip.duration
-        clip.close()
-        if duration > 0:
-            st.write(f"Validated video clip: {video_path}, Duration: {duration} seconds")
-            return True
-        else:
-            st.error(f"Video clip has zero duration: {video_path}")
-            logger.error(f"Video clip has zero duration: {video_path}")
-            return False
-    except Exception as e:
-        st.error(f"Invalid video segment: {video_path}, Error: {str(e)}")
-        logger.error(f"Invalid video segment: {video_path}, Error: {str(e)}")
-        return False
 
 def get_last_frame_image(video_path: str) -> Image.Image:
     """
@@ -194,7 +191,7 @@ def concatenate_videos(video_clips: list, crossfade_duration: float = 0.0) -> (V
     valid_clips = []
     for clip_path in video_clips:
         st.write(f"Attempting to load clip: {clip_path}")
-        if validate_video_clip(clip_path):
+        if cached_validate_video_clip(clip_path):
             try:
                 clip = VideoFileClip(clip_path)
                 valid_clips.append(clip)
@@ -214,7 +211,8 @@ def concatenate_videos(video_clips: list, crossfade_duration: float = 0.0) -> (V
     try:
         st.write(f"Attempting to concatenate {len(valid_clips)} valid clips")
         if crossfade_duration > 0:
-            final_video = concatenate_videoclips(valid_clips, method="compose", padding=-crossfade_duration, transition=vfx.crossfadein(crossfade_duration))
+            final_video = concatenate_videoclips(valid_clips, method="compose", padding=-crossfade_duration)
+            final_video = final_video.fx(vfx.fadein, crossfade_duration).fx(vfx.fadeout, crossfade_duration)
         else:
             final_video = concatenate_videoclips(valid_clips, method="compose")
         st.write(f"Concatenation successful. Final video duration: {final_video.duration} seconds")
@@ -226,49 +224,34 @@ def concatenate_videos(video_clips: list, crossfade_duration: float = 0.0) -> (V
             clip.close()
         return None, None
 
-def generate_multiple_images(api_key: str, prompt: str, num_images: int) -> list:
+async def generate_multiple_images_concurrently(session: aiohttp.ClientSession, api_key: str, prompt: str, num_images: int) -> list:
     """
-    Generate multiple images from a text prompt.
+    Generate multiple images from a text prompt concurrently.
     """
-    images = []
-    with st.spinner("Generating images..."):
-        for i in range(num_images):
-            st.write(f"Generating image {i+1}/{num_images}...")
-            image = generate_image_from_text(api_key, prompt)
-            if image:
-                resized_image = resize_image(image)
-                images.append(resized_image)
-                st.session_state.generated_images.append(resized_image)
-            else:
-                st.error(f"Failed to generate image {i+1}")
-                logger.error(f"Failed to generate image {i+1}")
+    tasks = []
+    for i in range(num_images):
+        tasks.append(generate_image_from_text(session, api_key, prompt))
+    images = await asyncio.gather(*tasks)
+    # Filter out any None images due to errors
+    images = [img for img in images if img is not None]
     return images
 
-def create_video_from_images(images: list, fps: int, output_path: str) -> str:
+def add_audio_to_video(video_path: str, audio_path: str, output_path: str) -> str:
     """
-    Create a video from a list of images.
+    Add background audio to a video.
     """
     try:
-        clips = [ImageClip(np.array(img)).set_duration(1 / fps) for img in images]
-        video = concatenate_videoclips(clips, method="compose")
-        video.write_videofile(output_path, fps=fps, codec="libx264", audio_codec="aac")
+        video_clip = VideoFileClip(video_path)
+        audio_clip = AudioFileClip(audio_path)
+        video_with_audio = video_clip.set_audio(audio_clip)
+        video_with_audio.write_videofile(output_path, codec="libx264", audio_codec="aac")
+        video_clip.close()
+        audio_clip.close()
         return output_path
     except Exception as e:
-        st.error(f"Error creating video from images: {str(e)}")
-        logger.error(f"Error creating video from images: {str(e)}")
+        st.error(f"Error adding audio to video: {str(e)}")
+        logger.error(f"Error adding audio to video: {str(e)}")
         return None
-
-def display_images_in_grid(images: list, columns: int = 3):
-    """
-    Display images in a grid layout with captions.
-    """
-    for i in range(0, len(images), columns):
-        cols = st.columns(columns)
-        for j in range(columns):
-            if i + j < len(images):
-                with cols[j]:
-                    st.image(images[i + j], use_column_width=True, caption=f"Image {i + j + 1}")
-                    st.markdown(f"<p style='text-align: center;'>Image {i + j + 1}</p>", unsafe_allow_html=True)
 
 def create_zip_file(images: list, videos: list, output_path: str = "generated_content.zip") -> str:
     """
@@ -300,50 +283,45 @@ def create_zip_file(images: list, videos: list, output_path: str = "generated_co
         logger.error(f"Error creating zip file: {str(e)}")
         return None
 
-def snapshot_mode_v2(api_key: str, prompt: str, num_segments: int, cfg_scale: float,
-                    motion_bucket_id: int, seed: int, crossfade_duration: float) -> list:
+def display_images_in_grid(images: list, columns: int = 3):
     """
-    Generate a series of video segments based on an initial image and user settings.
-    Returns a list of video clip paths.
+    Display images in a grid layout with captions.
     """
-    st.write("Generating initial image for Snapshot Mode v2...")
-    initial_image = generate_image_from_text(api_key, prompt)
-    if initial_image is None:
-        return []
+    for i in range(0, len(images), columns):
+        cols = st.columns(columns)
+        for j in range(columns):
+            if i + j < len(images):
+                with cols[j]:
+                    st.image(images[i + j], use_column_width=True, caption=f"Image {i + j + 1}")
+                    st.markdown(f"<p style='text-align: center;'>Image {i + j + 1}</p>", unsafe_allow_html=True)
 
-    initial_image = resize_image(initial_image)
-    st.session_state.generated_images.append(initial_image)
-
-    video_clips = []
-    current_image = initial_image
-
-    with TemporaryDirectory() as temp_dir:
-        for i in range(num_segments):
-            st.write(f"Generating video segment {i+1}/{num_segments}...")
-            generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
-
-            if generation_id:
-                video_content = poll_for_video(api_key, generation_id)
-                if video_content:
-                    video_path = os.path.join(temp_dir, f"video_segment_{i+1}.mp4")
-                    with open(video_path, "wb") as f:
-                        f.write(video_content)
-                    st.write(f"Saved video segment to {video_path}")
-                    video_clips.append(video_path)
-                    st.session_state.generated_videos.append(video_path)
-
-                    last_frame_image = get_last_frame_image(video_path)
-                    if last_frame_image:
-                        current_image = last_frame_image
-                        st.session_state.generated_images.append(current_image)
-                    else:
-                        st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
-                else:
-                    st.error(f"Failed to retrieve video content for segment {i+1}.")
-            else:
-                st.error(f"Failed to start video generation for segment {i+1}.")
-
-    return video_clips
+def display_video_with_download(video_path: str, index: int = None):
+    """
+    Display video and provide a download button.
+    """
+    if os.path.exists(video_path):
+        st.video(video_path)
+        if index is not None:
+            st.write(f"Video Segment {index + 1}")
+            with open(video_path, "rb") as f:
+                st.download_button(
+                    label=f"Download Video Segment {index + 1}",
+                    data=f,
+                    file_name=f"video_segment_{index + 1}.mp4",
+                    mime="video/mp4"
+                )
+        else:
+            st.write("Final Longform Video")
+            with open(video_path, "rb") as f:
+                st.download_button(
+                    label="Download Longform Video",
+                    data=f,
+                    file_name="longform_video.mp4",
+                    mime="video/mp4"
+                )
+    else:
+        st.error(f"Video file not found: {video_path}")
+        logger.error(f"Video file not found: {video_path}")
 
 def main():
     """
@@ -398,12 +376,21 @@ def main():
                     motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
                     seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
                     crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.1)
+                    resolution = st.selectbox("Select Video Resolution", ["720p", "1080p", "4K"], index=0)
             else:
                 cfg_scale = st.slider("CFG Scale (Stick to original image)", 0.0, 10.0, 1.8, 0.1)
                 motion_bucket_id = st.slider("Motion Bucket ID (Less motion to more motion)", 1, 255, 127)
                 seed = st.number_input("Seed (0 for random)", min_value=0, max_value=4294967294, value=0)
                 num_segments = st.slider("Number of video segments to generate", 1, 60, 5)
                 crossfade_duration = st.slider("Crossfade Duration (seconds)", 0.0, 2.0, 0.0, 0.1)
+                resolution = st.selectbox("Select Video Resolution", ["720p", "1080p", "4K"], index=1)
+
+            # New Feature: Audio Upload
+            st.markdown("---")
+            st.subheader("Audio Settings")
+            audio_file = st.file_uploader("Upload background music (MP3 or WAV)", type=["mp3", "wav"], key="audio_upload")
+            if audio_file:
+                st.session_state.audio_file = audio_file
 
         if st.button("Generate Content"):
             if not api_key:
@@ -423,130 +410,187 @@ def main():
             st.session_state.generated_videos = []
             st.session_state.final_video = None
 
+            # Set video resolution
+            resolution_map = {
+                "720p": (1280, 720),
+                "1080p": (1920, 1080),
+                "4K": (3840, 2160)
+            }
+            selected_resolution = resolution_map.get(resolution, (1920, 1080))
+
             try:
-                if mode == "Snapshot Mode":
-                    with TemporaryDirectory() as temp_dir:
-                        st.write("Generating images for Snapshot Mode...")
-                        images = generate_multiple_images(api_key, prompt, num_images)
+                with TemporaryDirectory() as temp_dir:
+                    # Initialize aiohttp session
+                    async with aiohttp.ClientSession() as session:
+                        if mode == "Snapshot Mode":
+                            # Generate multiple images concurrently
+                            with st.spinner("Generating images for Snapshot Mode..."):
+                                images = await generate_multiple_images_concurrently(session, api_key, prompt, num_images)
 
-                        if images:
-                            if use_video:
-                                st.write("Creating video from generated images...")
-                                video_clips = snapshot_mode_v2(
-                                    api_key, prompt, num_segments, cfg_scale,
-                                    motion_bucket_id, seed, crossfade_duration
-                                )
+                            if images:
+                                st.success(f"Successfully generated {len(images)} images.")
+                                st.session_state.generated_images = images
 
-                                if video_clips:
-                                    st.write("Concatenating video segments into one longform video...")
-                                    final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration)
+                                if use_video:
+                                    st.write("Generating video segments from images...")
+                                    video_clips = []
+                                    tasks = []
+                                    current_image = images[0]
 
-                                    if final_video:
-                                        final_video_path = os.path.join(temp_dir, "snapshot_longform_video.mp4")
-                                        final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
-                                        st.session_state.final_video = final_video_path
-                                        st.success(f"Snapshot Mode video created: {final_video_path}")
+                                    for i in range(num_segments):
+                                        tasks.append(start_video_generation(session, api_key, current_image, cfg_scale, motion_bucket_id, seed))
+
+                                    generation_ids = await asyncio.gather(*tasks)
+
+                                    for i, gen_id in enumerate(generation_ids):
+                                        if gen_id:
+                                            video_content = await poll_for_video(session, api_key, gen_id)
+                                            if video_content:
+                                                video_path = os.path.join(temp_dir, f"video_segment_{i+1}.mp4")
+                                                with open(video_path, "wb") as f:
+                                                    f.write(video_content)
+                                                st.write(f"Saved video segment {i+1}")
+                                                video_clips.append(video_path)
+                                                st.session_state.generated_videos.append(video_path)
+
+                                                last_frame_image = get_last_frame_image(video_path)
+                                                if last_frame_image:
+                                                    current_image = last_frame_image
+                                                    st.session_state.generated_images.append(current_image)
+                                                else:
+                                                    st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
+                                        else:
+                                            st.error(f"Failed to start video generation for segment {i+1}.")
+
+                                    if video_clips:
+                                        st.write("Concatenating video segments into one longform video...")
+                                        final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
+
+                                        if final_video:
+                                            # Adjust video resolution
+                                            final_video = final_video.resize(newsize=selected_resolution)
+
+                                            # Add audio if uploaded
+                                            if st.session_state.audio_file:
+                                                audio_path = os.path.join(temp_dir, "background_audio.mp3")
+                                                with open(audio_path, "wb") as f:
+                                                    f.write(st.session_state.audio_file.getbuffer())
+                                                final_video_path = os.path.join(temp_dir, "snapshot_longform_video_with_audio.mp4")
+                                                final_video = add_audio_to_video(final_video_path, audio_path, final_video_path)
+                                            else:
+                                                final_video_path = os.path.join(temp_dir, "snapshot_longform_video.mp4")
+                                                final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
+
+                                            st.session_state.final_video = final_video_path
+                                            st.success(f"Snapshot Mode video created: {final_video_path}")
+                                        else:
+                                            st.error("Failed to create the final video.")
                                     else:
-                                        st.error("Failed to create the final video.")
-                                else:
-                                    st.error("No video segments were successfully generated.")
+                                        st.error("No video segments were successfully generated.")
                             else:
-                                st.success(f"Generated {len(images)} images for Snapshot Mode.")
-                        else:
-                            st.error("Failed to generate images for Snapshot Mode.")
+                                st.error("Failed to generate images for Snapshot Mode.")
 
-                elif mode == "Text-to-Video":
-                    st.write("Generating image from text prompt...")
-                    image = generate_image_from_text(api_key, prompt)
-                    if image is None:
-                        return
-                    image = resize_image(image)
-                    st.session_state.generated_images.append(image)
+                        elif mode == "Text-to-Video":
+                            st.write("Generating image from text prompt...")
+                            image = await generate_image_from_text(session, api_key, prompt)
+                            if image is None:
+                                return
+                            image = resize_image(image)
+                            image = image.resize(selected_resolution)
+                            st.session_state.generated_images.append(image)
 
-                    video_clips = []
-                    current_image = image
+                            video_clips = []
+                            current_image = image
 
-                    for i in range(num_segments):
-                        st.write(f"Generating video segment {i+1}/{num_segments}...")
-                        generation_id = start_video_generation(api_key, current_image, cfg_scale, motion_bucket_id, seed)
+                            tasks = []
+                            for i in range(num_segments):
+                                tasks.append(start_video_generation(session, api_key, current_image, cfg_scale, motion_bucket_id, seed))
 
-                        if generation_id:
-                            video_content = poll_for_video(api_key, generation_id)
+                            generation_ids = await asyncio.gather(*tasks)
 
-                            if video_content:
-                                video_path = f"video_segment_{i+1}.mp4"
-                                with open(video_path, "wb") as f:
-                                    f.write(video_content)
-                                st.write(f"Saved video segment to {video_path}")
-                                video_clips.append(video_path)
-                                st.session_state.generated_videos.append(video_path)
+                            for i, gen_id in enumerate(generation_ids):
+                                if gen_id:
+                                    video_content = await poll_for_video(session, api_key, gen_id)
+                                    if video_content:
+                                        video_path = os.path.join(temp_dir, f"video_segment_{i+1}.mp4")
+                                        with open(video_path, "wb") as f:
+                                            f.write(video_content)
+                                        st.write(f"Saved video segment {i+1}")
+                                        video_clips.append(video_path)
+                                        st.session_state.generated_videos.append(video_path)
 
-                                last_frame_image = get_last_frame_image(video_path)
-                                if last_frame_image:
-                                    current_image = last_frame_image
-                                    st.session_state.generated_images.append(current_image)
+                                        last_frame_image = get_last_frame_image(video_path)
+                                        if last_frame_image:
+                                            current_image = last_frame_image
+                                            current_image = current_image.resize(selected_resolution)
+                                            st.session_state.generated_images.append(current_image)
+                                        else:
+                                            st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
                                 else:
-                                    st.warning(f"Could not extract last frame from segment {i+1}. Using previous image.")
-                            else:
-                                st.error(f"Failed to retrieve video content for segment {i+1}.")
-                        else:
-                            st.error(f"Failed to start video generation for segment {i+1}.")
+                                    st.error(f"Failed to start video generation for segment {i+1}.")
 
-                    if video_clips:
-                        st.write("Concatenating video segments into one longform video...")
-                        final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
-                        if final_video:
-                            try:
-                                final_video_path = "longform_video.mp4"
-                                final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
-                                st.session_state.final_video = final_video_path
-                                st.success(f"Longform video created: {final_video_path}")
-                            except Exception as e:
-                                st.error(f"Error writing final video: {str(e)}")
-                                logger.error(f"Error writing final video: {str(e)}")
-                                st.write("Traceback:", traceback.format_exc())
-                            finally:
+                            if video_clips:
+                                st.write("Concatenating video segments into one longform video...")
+                                final_video, valid_clips = concatenate_videos(video_clips, crossfade_duration=crossfade_duration)
+
                                 if final_video:
-                                    final_video.close()
-                                if valid_clips:
-                                    for clip in valid_clips:
-                                        clip.close()
+                                    # Adjust video resolution
+                                    final_video = final_video.resize(newsize=selected_resolution)
 
-                            # Clean up individual video segments
-                            for video_file in video_clips:
-                                if os.path.exists(video_file):
-                                    os.remove(video_file)
-                                    st.write(f"Removed temporary file: {video_file}")
+                                    # Add audio if uploaded
+                                    if st.session_state.audio_file:
+                                        audio_path = os.path.join(temp_dir, "background_audio.mp3")
+                                        with open(audio_path, "wb") as f:
+                                            f.write(st.session_state.audio_file.getbuffer())
+                                        final_video_path = os.path.join(temp_dir, "longform_video_with_audio.mp4")
+                                        final_video = add_audio_to_video(final_video_path, audio_path, final_video_path)
+                                    else:
+                                        final_video_path = os.path.join(temp_dir, "longform_video.mp4")
+                                        final_video.write_videofile(final_video_path, codec="libx264", audio_codec="aac")
+
+                                    st.session_state.final_video = final_video_path
+                                    st.success(f"Longform video created: {final_video_path}")
                                 else:
-                                    st.warning(f"Could not find file to remove: {video_file}")
-                        else:
-                            st.error("Failed to create the final video.")
-                    else:
-                        st.error("No video segments were successfully generated.")
+                                    st.error("Failed to create the final video.")
+                        elif mode == "Image-to-Video":
+                            image = Image.open(image_file)
+                            image = resize_image(image)
+                            image = image.resize(selected_resolution)
+                            st.session_state.generated_images.append(image)
 
-                elif mode == "Image-to-Video":
-                    image = Image.open(image_file)
-                    image = resize_image(image)
-                    st.session_state.generated_images.append(image)
+                            st.write("Generating video from uploaded image...")
+                            generation_id = await start_video_generation(session, api_key, image, cfg_scale, motion_bucket_id, seed)
 
-                    st.write("Generating video from uploaded image...")
-                    generation_id = start_video_generation(api_key, image, cfg_scale, motion_bucket_id, seed)
+                            if generation_id:
+                                video_content = await poll_for_video(session, api_key, generation_id)
+                                if video_content:
+                                    video_path = os.path.join(temp_dir, "image_to_video.mp4")
+                                    with open(video_path, "wb") as f:
+                                        f.write(video_content)
+                                    st.write(f"Saved video to {video_path}")
+                                    st.session_state.generated_videos.append(video_path)
 
-                    if generation_id:
-                        video_content = poll_for_video(api_key, generation_id)
+                                    # Adjust video resolution
+                                    with VideoFileClip(video_path) as clip:
+                                        clip_resized = clip.resize(newsize=selected_resolution)
+                                        clip_resized.write_videofile(video_path, codec="libx264", audio_codec="aac")
 
-                        if video_content:
-                            video_path = "image_to_video.mp4"
-                            with open(video_path, "wb") as f:
-                                f.write(video_content)
-                            st.write(f"Saved video to {video_path}")
-                            st.session_state.generated_videos.append(video_path)
-                            st.session_state.final_video = video_path
-                            st.success(f"Image-to-Video created: {video_path}")
-                        else:
-                            st.error("Failed to retrieve video content.")
-                    else:
-                        st.error("Failed to start video generation.")
+                                    # Add audio if uploaded
+                                    if st.session_state.audio_file:
+                                        audio_path = os.path.join(temp_dir, "background_audio.mp3")
+                                        with open(audio_path, "wb") as f:
+                                            f.write(st.session_state.audio_file.getbuffer())
+                                        final_video_path = os.path.join(temp_dir, "image_to_video_with_audio.mp4")
+                                        final_video = add_audio_to_video(video_path, audio_path, final_video_path)
+                                        st.session_state.final_video = final_video_path
+                                    else:
+                                        st.session_state.final_video = video_path
+
+                                    st.success(f"Image-to-Video created: {video_path}")
+                                else:
+                                    st.error("Failed to retrieve video content.")
+                            else:
+                                st.error("Failed to start video generation.")
 
             except Exception as e:
                 st.error(f"An unexpected error occurred: {str(e)}")
@@ -564,46 +608,29 @@ def main():
         st.subheader("Generated Videos")
         if st.session_state.generated_videos:
             for i, video_path in enumerate(st.session_state.generated_videos):
-                if os.path.exists(video_path):
-                    st.video(video_path)
-                    st.write(f"Video Segment {i+1}")
-                    with open(video_path, "rb") as f:
-                        st.download_button(
-                            label=f"Download Video Segment {i+1}",
-                            data=f,
-                            file_name=f"video_segment_{i+1}.mp4",
-                            mime="video/mp4"
-                        )
-                else:
-                    st.error(f"Video file not found: {video_path}")
-
+                display_video_with_download(video_path, index=i)
+            
             if st.session_state.final_video and os.path.exists(st.session_state.final_video):
                 st.subheader("Final Longform Video")
-                st.video(st.session_state.final_video)
-                with open(st.session_state.final_video, "rb") as f:
-                    st.download_button(
-                        label="Download Longform Video",
-                        data=f,
-                        file_name="longform_video.mp4",
-                        mime="video/mp4"
-                    )
+                display_video_with_download(st.session_state.final_video)
         else:
             st.write("No videos generated yet. Use the Generator tab to create videos.")
 
     # Add download all button
     if st.session_state.generated_images or st.session_state.generated_videos:
-        zip_path = create_zip_file(st.session_state.generated_images, st.session_state.generated_videos)
-        if zip_path and os.path.exists(zip_path):
-            with open(zip_path, "rb") as f:
-                st.download_button(
-                    label="Download All Content (ZIP)",
-                    data=f,
-                    file_name="generated_content.zip",
-                    mime="application/zip"
-                )
-            os.remove(zip_path)
-        else:
-            st.error("Failed to create ZIP file.")
+        with TemporaryDirectory() as temp_dir:
+            zip_path = create_zip_file(st.session_state.generated_images, st.session_state.generated_videos)
+            if zip_path and os.path.exists(zip_path):
+                with open(zip_path, "rb") as f:
+                    st.download_button(
+                        label="Download All Content (ZIP)",
+                        data=f,
+                        file_name="generated_content.zip",
+                        mime="application/zip"
+                    )
+                os.remove(zip_path)
+            else:
+                st.error("Failed to create ZIP file.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
