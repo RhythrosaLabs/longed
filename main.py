@@ -1,6 +1,7 @@
 import os
-import time
 import threading
+import tempfile
+import time
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from moviepy.editor import (
@@ -14,7 +15,6 @@ from moviepy.editor import (
 from moviepy.video.fx.all import fadein, fadeout
 from PIL import Image
 import streamlit as st
-import tempfile
 
 # ============================
 # Configuration Defaults
@@ -23,9 +23,9 @@ import tempfile
 DEFAULT_SNAPSHOT_DIR = 'snapshots'
 DEFAULT_OUTPUT_DIR = 'output'
 DEFAULT_ASSETS_DIR = 'assets'
-DEFAULT_FRAME_RATE = 24
-DEFAULT_TRANSITION_DURATION = 1  # seconds
-DEFAULT_VIDEO_DURATION = 2  # seconds per image
+DEFAULT_FRAME_RATE = 24.0
+DEFAULT_TRANSITION_DURATION = 1.0  # seconds
+DEFAULT_VIDEO_DURATION = 2.0  # seconds per image
 DEFAULT_VIDEO_CODEC = 'libx264'
 DEFAULT_VIDEO_FORMAT = 'mp4'
 DEFAULT_OUTPUT_VIDEO = os.path.join(DEFAULT_OUTPUT_DIR, 'output_video.mp4')
@@ -72,10 +72,14 @@ class VideoGenerator:
 
     def get_sorted_image_paths(self):
         """Retrieve and sort image paths from the snapshot directory."""
-        images = [img for img in os.listdir(self.snapshot_dir) if img.lower().endswith(IMAGE_FORMATS)]
-        images.sort()  # Sort images by name; modify if necessary
-        image_paths = [os.path.join(self.snapshot_dir, img) for img in images]
-        return image_paths
+        try:
+            images = [img for img in os.listdir(self.snapshot_dir) if img.lower().endswith(IMAGE_FORMATS)]
+            images.sort()  # Sort images by name; modify if necessary
+            image_paths = [os.path.join(self.snapshot_dir, img) for img in images]
+            return image_paths
+        except Exception as e:
+            st.error(f"Error accessing snapshot directory: {e}")
+            return []
 
     def create_video(self, image_paths, progress_callback=None):
         """Create a video from image paths with optional transitions and text overlays."""
@@ -123,7 +127,11 @@ class VideoGenerator:
                 continue
 
         # Concatenate clips
-        final_clip = concatenate_videoclips(clips, method="compose")
+        try:
+            final_clip = concatenate_videoclips(clips, method="compose")
+        except Exception as e:
+            st.error(f"Error concatenating video clips: {e}")
+            return
         
         # Add background audio if enabled
         if self.enable_audio and os.path.exists(self.audio_file):
@@ -193,43 +201,60 @@ def main():
     st.set_page_config(page_title="🔥 Super Bad Ass Video Generator and Editor 🔥", layout="wide")
     st.title("🔥 **Super Bad Ass Video Generator and Editor** 🔥")
     
+    # Initialize session state
+    if 'observer' not in st.session_state:
+        st.session_state.observer = None
+    if 'handler' not in st.session_state:
+        st.session_state.handler = None
+    if 'generator' not in st.session_state:
+        st.session_state.generator = None
+    if 'running' not in st.session_state:
+        st.session_state.running = False
+
     # Sidebar for configuration
     st.sidebar.header("⚙️ Configuration")
     
     # Snapshot Directory
     snapshot_dir = st.sidebar.text_input("📸 Snapshots Directory", DEFAULT_SNAPSHOT_DIR)
-    if st.sidebar.button("📂 Browse Snapshots Directory"):
-        snapshot_dir = st.sidebar.text_input("📸 Snapshots Directory", st.sidebar.text_input("Select Directory"))
     
     # Output Directory
     output_dir = st.sidebar.text_input("📂 Output Directory", DEFAULT_OUTPUT_DIR)
-    if st.sidebar.button("📂 Browse Output Directory"):
-        output_dir = st.sidebar.text_input("📂 Output Directory", st.sidebar.text_input("Select Directory"))
     
     # Assets Directory
     assets_dir = st.sidebar.text_input("🎨 Assets Directory", DEFAULT_ASSETS_DIR)
-    if st.sidebar.button("📂 Browse Assets Directory"):
-        assets_dir = st.sidebar.text_input("🎨 Assets Directory", st.sidebar.text_input("Select Directory"))
     
     # Output Video File
-    output_video = st.sidebar.text_input("🎥 Output Video File", DEFAULT_OUTPUT_VIDEO)
-    if st.sidebar.button("🎥 Browse Output Video File"):
-        output_video = st.sidebar.text_input("🎥 Output Video File", st.sidebar.text_input("Select File"))
+    video_filename = st.sidebar.text_input("🎥 Output Video Filename", "output_video.mp4")
+    video_format = st.sidebar.selectbox("📄 Video Format", ['mp4', 'avi', 'webm'], index=0)
+    output_video = os.path.join(output_dir, video_filename)
+    if not output_video.endswith(f".{video_format}"):
+        output_video += f".{video_format}"
     
     # Frame Rate
-    frame_rate = st.sidebar.slider("⏱️ Frame Rate (fps)", 1, 60, DEFAULT_FRAME_RATE)
+    frame_rate = st.sidebar.slider("⏱️ Frame Rate (fps)", 1.0, 60.0, DEFAULT_FRAME_RATE, 0.1)
     
     # Transition Duration
-    transition_duration = st.sidebar.slider("🔄 Transition Duration (s)", 0.1, 5.0, DEFAULT_TRANSITION_DURATION, 0.1)
+    transition_duration = st.sidebar.slider(
+        "🔄 Transition Duration (s)", 
+        0.1, 
+        5.0, 
+        DEFAULT_TRANSITION_DURATION, 
+        0.1,
+        key='transition_duration_slider'
+    )
     
     # Video Duration per Image
-    video_duration = st.sidebar.slider("⏳ Duration per Image (s)", 1.0, 10.0, DEFAULT_VIDEO_DURATION, 0.5)
+    video_duration = st.sidebar.slider(
+        "⏳ Duration per Image (s)", 
+        1.0, 
+        10.0, 
+        DEFAULT_VIDEO_DURATION, 
+        0.5,
+        key='video_duration_slider'
+    )
     
     # Video Codec
     video_codec = st.sidebar.selectbox("🖥️ Video Codec", ['libx264', 'mpeg4', 'libvpx'], index=0)
-    
-    # Video Format
-    video_format = st.sidebar.selectbox("📄 Video Format", ['mp4', 'avi', 'webm'], index=0)
     
     # Background Audio File
     audio_file = st.sidebar.file_uploader("🎵 Upload Background Audio File", type=['mp3', 'wav', 'aac', 'm4a'])
@@ -272,65 +297,88 @@ def main():
         text_fontsize = 24
         text_color = "#FFFFFF"
     
-    # Initialize Video Generator
-    generator = VideoGenerator(
-        snapshot_dir=snapshot_dir,
-        output_dir=output_dir,
-        assets_dir=assets_dir,
-        output_video=output_video,
-        frame_rate=frame_rate,
-        transition_duration=transition_duration,
-        video_duration=video_duration,
-        video_codec=video_codec,
-        video_format=video_format,
-        audio_file=audio_file_path,
-        font_path=font_path,
-        enable_transitions=enable_transitions,
-        enable_audio=enable_audio,
-        enable_text=enable_text,
-        text_content=text_content,
-        text_position=text_position,
-        text_fontsize=text_fontsize,
-        text_color=text_color
-    )
-    
     # Progress Bar
     progress_bar = st.progress(0)
+    progress_text = st.empty()
     
     # Function to update progress
     def update_progress(progress):
         progress_bar.progress(progress)
+        progress_text.text(f"Processing... {int(progress * 100)}%")
     
-    # Watchdog Handler
-    handler = VideoGeneratorHandler(generator, progress_callback=update_progress)
-    observer = Observer()
-    observer.schedule(handler, path=snapshot_dir, recursive=False)
-    observer_thread = threading.Thread(target=observer.start, daemon=True)
+    # Start Video Generation and Monitoring
+    if st.sidebar.button("🚀 Start Video Generation and Monitoring"):
+        if st.session_state.running:
+            st.warning("Video generation and monitoring is already running.")
+        else:
+            # Validate directories
+            if not os.path.exists(snapshot_dir):
+                st.error(f"Snapshot directory does not exist: `{snapshot_dir}`")
+            elif not os.path.exists(output_dir):
+                try:
+                    os.makedirs(output_dir)
+                    st.warning(f"Output directory created: `{output_dir}`")
+                except Exception as e:
+                    st.error(f"Error creating output directory: {e}")
+            elif not os.path.exists(assets_dir):
+                try:
+                    os.makedirs(assets_dir)
+                    st.warning(f"Assets directory created: `{assets_dir}`")
+                except Exception as e:
+                    st.error(f"Error creating assets directory: {e}")
+            else:
+                # Initialize VideoGenerator
+                generator = VideoGenerator(
+                    snapshot_dir=snapshot_dir,
+                    output_dir=output_dir,
+                    assets_dir=assets_dir,
+                    output_video=output_video,
+                    frame_rate=frame_rate,
+                    transition_duration=transition_duration,
+                    video_duration=video_duration,
+                    video_codec=video_codec,
+                    video_format=video_format,
+                    audio_file=audio_file_path,
+                    font_path=font_path,
+                    enable_transitions=enable_transitions,
+                    enable_audio=enable_audio,
+                    enable_text=enable_text,
+                    text_content=text_content,
+                    text_position=text_position,
+                    text_fontsize=text_fontsize,
+                    text_color=text_color
+                )
+                
+                # Initial Video Creation
+                with st.spinner("Generating initial video..."):
+                    generator.create_video(generator.get_sorted_image_paths(), update_progress)
+                
+                # Set up Watchdog Handler and Observer
+                handler = VideoGeneratorHandler(generator, progress_callback=update_progress)
+                observer = Observer()
+                observer.schedule(handler, path=snapshot_dir, recursive=False)
+                observer.start()
+                
+                # Save to session state
+                st.session_state.observer = observer
+                st.session_state.handler = handler
+                st.session_state.generator = generator
+                st.session_state.running = True
+                
+                st.success("🛰️ Started monitoring snapshots directory for new images.")
     
-    # Start Watchdog Observer
-    if st.button("🚀 Start Video Generation and Monitoring"):
-        if not os.path.exists(snapshot_dir):
-            st.error(f"Snapshot directory does not exist: `{snapshot_dir}`")
-        elif not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            st.warning(f"Output directory created: `{output_dir}`")
-        elif not os.path.exists(assets_dir):
-            os.makedirs(assets_dir)
-            st.warning(f"Assets directory created: `{assets_dir}`")
-        
-        # Initial Video Creation
-        with st.spinner("Generating initial video..."):
-            generator.create_video(generator.get_sorted_image_paths(), update_progress)
-        
-        # Start Observer Thread
-        observer_thread.start()
-        st.success("🛰️ Started monitoring snapshots directory for new images.")
-    
-    # Stop Watchdog Observer
-    if st.button("🛑 Stop Monitoring"):
-        observer.stop()
-        observer.join()
-        st.success("🛑 Stopped monitoring snapshots directory.")
+    # Stop Video Generation and Monitoring
+    if st.sidebar.button("🛑 Stop Monitoring"):
+        if st.session_state.running:
+            try:
+                st.session_state.observer.stop()
+                st.session_state.observer.join()
+                st.session_state.running = False
+                st.success("🛑 Stopped monitoring snapshots directory.")
+            except Exception as e:
+                st.error(f"Error stopping observer: {e}")
+        else:
+            st.warning("Video generation and monitoring is not running.")
     
     # Display Output Video
     if os.path.exists(output_video):
@@ -353,6 +401,8 @@ def main():
     
     # Cleanup Temporary Files on Exit
     def cleanup():
+        if 'handler' in st.session_state and st.session_state.handler:
+            st.session_state.handler.update_triggered = False
         if audio_file:
             os.unlink(audio_file_path)
         if font_file:
