@@ -8,3 +8,4 @@ pillow
 replicate
 aiohttp
 nest_asyncio
+opencv-python
